@@ -1,0 +1,43 @@
+
+
+if you want to insmod our *.ko , we need change the platform_device (compatible=fsl,imx6ull-usdhc-test) on the device tree
+and change the name under code of *.ko , then the driver can probe successfully. 
+
+drivers/mmc-test/host/sdhci-esdhc-imx-test.c
+
+
+static const struct of_device_id imx_esdhc_dt_ids[] = {
+        { .compatible = "fsl,imx25-esdhc", .data = &esdhc_imx25_data, },
+        { .compatible = "fsl,imx35-esdhc", .data = &esdhc_imx35_data, },
+        { .compatible = "fsl,imx51-esdhc", .data = &esdhc_imx51_data, },
+        { .compatible = "fsl,imx53-esdhc", .data = &esdhc_imx53_data, },
+        { .compatible = "fsl,imx6sx-usdhc", .data = &usdhc_imx6sx_data, },
+        { .compatible = "fsl,imx6sl-usdhc", .data = &usdhc_imx6sl_data, },
+        { .compatible = "fsl,imx6q-usdhc", .data = &usdhc_imx6q_data, },
+        { .compatible = "fsl,imx6ull-usdhc-test", .data = &usdhc_imx6ull_data, },
+        { .compatible = "fsl,imx7d-usdhc", .data = &usdhc_imx7d_data, },
+        { .compatible = "fsl,imx7ulp-usdhc", .data = &usdhc_imx7ulp_data, },
+        { .compatible = "fsl,imx8qxp-usdhc", .data = &usdhc_imx8qxp_data, },
+        { .compatible = "fsl,imx8mm-usdhc", .data = &usdhc_imx8mm_data, },
+        { /* sentinel */ }
+};
+
+
+./arch/arm/boot/dts/imx6ull.dtsi
+
+usdhc1: usdhc@2190000 {
+        compatible = "fsl,imx6ull-usdhc-test", "fsl,imx6sx-usdhc-test";
+        reg = <0x2190000 0x4000>;
+        interrupts = <GIC_SPI 22 IRQ_TYPE_LEVEL_HIGH>;
+        clocks = <&clks IMX6UL_CLK_USDHC1>,
+                 <&clks IMX6UL_CLK_USDHC1>,
+                 <&clks IMX6UL_CLK_USDHC1>;
+        clock-names = "ipg", "ahb", "per";
+        assigned-clocks = <&clks IMX6UL_CLK_USDHC1_SEL>, <&clks IMX6UL_CLK_USDHC1>;
+        assigned-clock-parents = <&clks IMX6UL_CLK_PLL2_PFD2>;
+        assigned-clock-rates = <0>, <132000000>;
+        bus-width = <4>;
+        fsl,tuning-step= <2>;
+        status = "disabled";
+};
+

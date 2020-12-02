@@ -4,6 +4,7 @@
 #
 
 #obj-$(CONFIG_MMC_SDHCI)		+= sdhci.o
-obj-m	+= sdhci-esdhc-imx-test.o
+obj-$(CONFIG_MMC_SDHCI_PLTFM)           += sdhci-pltfm.o
+obj-m					+= sdhci-esdhc-imx-test.o
 
 

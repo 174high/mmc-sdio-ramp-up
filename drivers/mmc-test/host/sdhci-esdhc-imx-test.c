@@ -17,8 +17,8 @@
 #include <linux/pinctrl/consumer.h>
 #include <linux/platform_data/mmc-esdhc-imx.h>
 #include <linux/pm_runtime.h>
-//#include "sdhci-pltfm.h"
-//#include "sdhci-esdhc.h"
+#include "sdhci-pltfm.h"
+#include "sdhci-esdhc.h"
 //#include "cqhci.h"
 
 
@@ -158,6 +158,44 @@ static struct esdhc_soc_data usdhc_imx8mm_data = {
                         | ESDHC_FLAG_BUSFREQ,
 };
 
+struct pltfm_imx_data {
+        u32 scratchpad;
+        struct pinctrl *pinctrl;
+        struct pinctrl_state *pins_default;
+        struct pinctrl_state *pins_100mhz;
+        struct pinctrl_state *pins_200mhz;
+        const struct esdhc_soc_data *socdata;
+        struct esdhc_platform_data boarddata;
+        struct clk *clk_ipg;
+        struct clk *clk_ahb;
+        struct clk *clk_per; 
+        unsigned int actual_clock;
+        enum {
+                NO_CMD_PENDING,      /* no multiblock command pending */
+                MULTIBLK_IN_PROCESS, /* exact multiblock cmd in process */
+                WAIT_FOR_INT,        /* sent CMD12, waiting for response INT */
+        } multiblock_status;
+        u32 is_ddr;
+        struct pm_qos_request pm_qos_req;
+};
+
+static const struct platform_device_id imx_esdhc_devtype[] = {
+        {
+                .name = "sdhci-esdhc-imx25",
+                .driver_data = (kernel_ulong_t) &esdhc_imx25_data,
+        }, {
+                .name = "sdhci-esdhc-imx35",
+                .driver_data = (kernel_ulong_t) &esdhc_imx35_data,
+        }, {
+                .name = "sdhci-esdhc-imx51",
+                .driver_data = (kernel_ulong_t) &esdhc_imx51_data,
+        }, {
+                /* sentinel */
+        }
+};
+MODULE_DEVICE_TABLE(platform, imx_esdhc_devtype);
+
+
 static const struct of_device_id imx_esdhc_dt_ids[] = {
         { .compatible = "fsl,imx25-esdhc", .data = &esdhc_imx25_data, },
         { .compatible = "fsl,imx35-esdhc", .data = &esdhc_imx35_data, },
@@ -166,7 +204,7 @@ static const struct of_device_id imx_esdhc_dt_ids[] = {
         { .compatible = "fsl,imx6sx-usdhc", .data = &usdhc_imx6sx_data, },
         { .compatible = "fsl,imx6sl-usdhc", .data = &usdhc_imx6sl_data, },
         { .compatible = "fsl,imx6q-usdhc", .data = &usdhc_imx6q_data, },
-        { .compatible = "fsl,imx6ull-usdhc", .data = &usdhc_imx6ull_data, },
+        { .compatible = "fsl,imx6ull-usdhc-test", .data = &usdhc_imx6ull_data, },
         { .compatible = "fsl,imx7d-usdhc", .data = &usdhc_imx7d_data, },
         { .compatible = "fsl,imx7ulp-usdhc", .data = &usdhc_imx7ulp_data, },
         { .compatible = "fsl,imx8qxp-usdhc", .data = &usdhc_imx8qxp_data, },
@@ -176,15 +214,60 @@ static const struct of_device_id imx_esdhc_dt_ids[] = {
 
 MODULE_DEVICE_TABLE(of, imx_esdhc_dt_ids);
 
+/*
+static const struct dev_pm_ops sdhci_esdhc_pmops = {
+        SET_SYSTEM_SLEEP_PM_OPS(sdhci_esdhc_suspend, sdhci_esdhc_resume)
+        SET_RUNTIME_PM_OPS(sdhci_esdhc_runtime_suspend,
+                                sdhci_esdhc_runtime_resume, NULL)
+};
+*/
+
+static const struct sdhci_pltfm_data sdhci_esdhc_imx_pdata = {
+
+	.quirks = ESDHC_DEFAULT_QUIRKS,	
+//        .quirks = ESDHC_DEFAULT_QUIRKS | SDHCI_QUIRK_NO_HISPD_BIT
+//                        | SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC
+//                        | SDHCI_QUIRK_BROKEN_ADMA_ZEROLEN_DESC
+//                        | SDHCI_QUIRK_BROKEN_CARD_DETECTION,
+//        .ops = &sdhci_esdhc_ops,
+};
+
+static int sdhci_esdhc_imx_probe(struct platform_device *pdev)
+{
+	const struct of_device_id *of_id =
+                        of_match_device(imx_esdhc_dt_ids, &pdev->dev);
+        struct sdhci_pltfm_host *pltfm_host;
+        struct sdhci_host *host;
+        struct cqhci_host *cq_host;
+	int err;
+ 	struct pltfm_imx_data *imx_data;
+        u32 status;
+
+	pr_info("sdhci_esdhc_imx_probe shijonn \r\n");
+
+	host = sdhci_pltfm_init(pdev, &sdhci_esdhc_imx_pdata,
+                                sizeof(*imx_data));	
+
+
+	return err;
+}
+
+static int sdhci_esdhc_imx_remove(struct platform_device *pdev)
+{
+
+
+	return 0 ;
+}
+
 static struct platform_driver sdhci_esdhc_imx_driver = {
         .driver         = {
                 .name   = "sdhci-esdhc-imx-test",
                 .of_match_table = imx_esdhc_dt_ids,
 //                .pm     = &sdhci_esdhc_pmops,
         },
-//        .id_table       = imx_esdhc_devtype,
-//        .probe          = sdhci_esdhc_imx_probe,
-//        .remove         = sdhci_esdhc_imx_remove,
+         .id_table       = imx_esdhc_devtype,
+         .probe          = sdhci_esdhc_imx_probe,
+         .remove         = sdhci_esdhc_imx_remove,
 };
 
 module_platform_driver(sdhci_esdhc_imx_driver);
