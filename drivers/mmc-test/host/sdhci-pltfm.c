@@ -37,6 +37,13 @@
 #endif
 #include "sdhci-pltfm.h"
 
+static const struct sdhci_ops sdhci_pltfm_ops = {
+        .set_clock = sdhci_set_clock,
+        .set_bus_width = sdhci_set_bus_width,
+        .reset = sdhci_reset,
+        .set_uhs_signaling = sdhci_set_uhs_signaling,
+};
+
 struct sdhci_host *sdhci_pltfm_init(struct platform_device *pdev,
                                     const struct sdhci_pltfm_data *pdata,
                                     size_t priv_size)
@@ -46,10 +53,46 @@ struct sdhci_host *sdhci_pltfm_init(struct platform_device *pdev,
         void __iomem *ioaddr;
         int irq, ret;
 
-
 	iomem = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+	ioaddr = devm_ioremap_resource(&pdev->dev, iomem);
+        if (IS_ERR(ioaddr)) {
+                ret = PTR_ERR(ioaddr);
+                goto err;
+        }					
 
+	  irq = platform_get_irq(pdev, 0);
+        if (irq < 0) {
+                dev_err(&pdev->dev, "failed to get IRQ number\n");
+                ret = irq;
+                goto err;
+        }
 
+        host = sdhci_alloc_host(&pdev->dev,
+                sizeof(struct sdhci_pltfm_host) + priv_size);
+
+        if (IS_ERR(host)) {
+                ret = PTR_ERR(host);
+                goto err;
+        }
+
+        host->ioaddr = ioaddr;
+        host->irq = irq;
+        host->hw_name = dev_name(&pdev->dev);
+        if (pdata && pdata->ops)
+                host->ops = pdata->ops;
+        else
+                host->ops = &sdhci_pltfm_ops;
+        if (pdata) {
+                host->quirks = pdata->quirks;
+                host->quirks2 = pdata->quirks2;
+        }
+
+        platform_set_drvdata(pdev, host);
+
+        return host;
+err:
+        dev_err(&pdev->dev, "%s failed %d\n", __func__, ret);
+        return ERR_PTR(ret);
 }
 EXPORT_SYMBOL_GPL(sdhci_pltfm_init);
 
