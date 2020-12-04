@@ -224,11 +224,10 @@ static const struct dev_pm_ops sdhci_esdhc_pmops = {
 
 static const struct sdhci_pltfm_data sdhci_esdhc_imx_pdata = {
 
-	.quirks = ESDHC_DEFAULT_QUIRKS,	
-//        .quirks = ESDHC_DEFAULT_QUIRKS | SDHCI_QUIRK_NO_HISPD_BIT
-//                        | SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC
-//                        | SDHCI_QUIRK_BROKEN_ADMA_ZEROLEN_DESC
-//                        | SDHCI_QUIRK_BROKEN_CARD_DETECTION,
+        .quirks = ESDHC_DEFAULT_QUIRKS | SDHCI_QUIRK_NO_HISPD_BIT
+                        | SDHCI_QUIRK_NO_ENDATTR_IN_NOPDESC
+                        | SDHCI_QUIRK_BROKEN_ADMA_ZEROLEN_DESC
+                        | SDHCI_QUIRK_BROKEN_CARD_DETECTION,
 //        .ops = &sdhci_esdhc_ops,
 };
 
