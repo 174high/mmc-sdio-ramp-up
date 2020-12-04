@@ -67,8 +67,8 @@ struct sdhci_host *sdhci_pltfm_init(struct platform_device *pdev,
                 goto err;
         }
 
-        host = sdhci_alloc_host(&pdev->dev,
-                sizeof(struct sdhci_pltfm_host) + priv_size);
+// shijonn        host = sdhci_alloc_host(&pdev->dev,
+//                sizeof(struct sdhci_pltfm_host) + priv_size);
 
         if (IS_ERR(host)) {
                 ret = PTR_ERR(host);
@@ -100,7 +100,7 @@ void sdhci_pltfm_free(struct platform_device *pdev)
 {
         struct sdhci_host *host = platform_get_drvdata(pdev);
 
-       	sdhci_free_host(host);
+//       	sdhci_free_host(host);
 }
 EXPORT_SYMBOL_GPL(sdhci_pltfm_free);
 
