@@ -67,8 +67,8 @@ struct sdhci_host *sdhci_pltfm_init(struct platform_device *pdev,
                 goto err;
         }
 
-// shijonn        host = sdhci_alloc_host(&pdev->dev,
-//                sizeof(struct sdhci_pltfm_host) + priv_size);
+        host = sdhci_alloc_host(&pdev->dev,
+                sizeof(struct sdhci_pltfm_host) + priv_size);
 
         if (IS_ERR(host)) {
                 ret = PTR_ERR(host);
