@@ -46,6 +46,40 @@ static struct class mmc_host_class = {
         .dev_release    = mmc_host_classdev_release,
 };
 
+void mmc_retune_unpause(struct mmc_host *host)
+{
+        if (host->retune_paused) {
+                host->retune_paused = 0;
+                mmc_retune_release(host);
+        }
+}       
+EXPORT_SYMBOL(mmc_retune_unpause);
+
+void mmc_retune_disable(struct mmc_host *host)
+{
+        mmc_retune_unpause(host);
+        host->can_retune = 0;
+        del_timer_sync(&host->retune_timer);
+        host->retune_now = 0;
+        host->need_retune = 0;
+}
+
+void mmc_retune_hold(struct mmc_host *host)
+{
+        if (!host->hold_retune)
+                host->retune_now = 1;
+        host->hold_retune += 1;
+}
+
+void mmc_retune_release(struct mmc_host *host)
+{
+        if (host->hold_retune)
+                host->hold_retune -= 1;
+        else
+                WARN_ON(1);
+}
+EXPORT_SYMBOL(mmc_retune_release);
+
 
 /**
  *      mmc_alloc_host - initialise the per-host structure.

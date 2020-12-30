@@ -40,6 +40,9 @@
 #include <trace/events/mmc.h>
 
 #include "core.h"
+#include "host.h"
+
+#include "pwrseq.h"
 
 /* The max erase timeout, used when host->max_busy_timeout isn't specified */
 #define MMC_ERASE_TIMEOUT_MS    (60 * 1000) /* 60 s */
@@ -69,6 +72,165 @@ int mmc_first_nonreserved_index(void)
 }
 EXPORT_SYMBOL(mmc_first_nonreserved_index);
 
+/*
+ * Increase reference count of bus operator
+ */
+static inline void mmc_bus_get(struct mmc_host *host)
+{
+        unsigned long flags; 
+
+        spin_lock_irqsave(&host->lock, flags);
+        host->bus_refs++;
+        spin_unlock_irqrestore(&host->lock, flags);
+}
+
+/*
+ * Cleanup when the last reference to the bus operator is dropped.
+ */
+static void __mmc_release_bus(struct mmc_host *host)
+{
+        WARN_ON(!host->bus_dead);
+
+        host->bus_ops = NULL;
+}
+
+/*
+ * Decrease reference count of bus operator and free it if 
+ * it is the last reference. 
+ */ 
+static inline void mmc_bus_put(struct mmc_host *host)
+{   
+        unsigned long flags;
+    
+        spin_lock_irqsave(&host->lock, flags);
+        host->bus_refs--;
+        if ((host->bus_refs == 0) && host->bus_ops)
+                __mmc_release_bus(host);
+        spin_unlock_irqrestore(&host->lock, flags);
+}
+
+/*
+ * Internal function that does the actual ios call to the host driver,
+ * optionally printing some debug output.
+ */
+static inline void mmc_set_ios(struct mmc_host *host)
+{
+        struct mmc_ios *ios = &host->ios;
+
+        pr_debug("%s: clock %uHz busmode %u powermode %u cs %u Vdd %u "
+                "width %u timing %u\n", 
+                 mmc_hostname(host), ios->clock, ios->bus_mode,
+                 ios->power_mode, ios->chip_select, ios->vdd,
+                 1 << ios->bus_width, ios->timing);
+
+        host->ops->set_ios(host, ios); 
+} 
+
+/*
+ * Set initial state after a power cycle or a hw_reset.
+ */
+void mmc_set_initial_state(struct mmc_host *host)
+{
+        if (host->cqe_on)
+                host->cqe_ops->cqe_off(host);
+
+        mmc_retune_disable(host);
+
+        if (mmc_host_is_spi(host))
+                host->ios.chip_select = MMC_CS_HIGH;
+        else
+                host->ios.chip_select = MMC_CS_DONTCARE;
+        host->ios.bus_mode = MMC_BUSMODE_PUSHPULL;
+        host->ios.bus_width = MMC_BUS_WIDTH_1;
+        host->ios.timing = MMC_TIMING_LEGACY;
+        host->ios.drv_type = 0;
+        host->ios.enhanced_strobe = false;
+
+        /*
+         * Make sure we are in non-enhanced strobe mode before we
+         * actually enable it in ext_csd.
+         */
+        if ((host->caps2 & MMC_CAP2_HS400_ES) &&
+             host->ops->hs400_enhanced_strobe)
+                host->ops->hs400_enhanced_strobe(host, &host->ios);
+
+        mmc_set_ios(host); 
+}
+
+void mmc_power_off(struct mmc_host *host)
+{
+        if (host->ios.power_mode == MMC_POWER_OFF)
+                return;
+
+        mmc_pwrseq_power_off(host);
+
+        host->ios.clock = 0; 
+        host->ios.vdd = 0;
+
+        host->ios.power_mode = MMC_POWER_OFF;
+        /* Set initial state and call mmc_set_ios */
+        mmc_set_initial_state(host);
+
+        /*
+         * Some configurations, such as the 802.11 SDIO card in the OLPC
+         * XO-1.5, require a short delay after poweroff before the card
+         * can be successfully turned on again.
+         */ 
+        mmc_delay(1);
+} 
+
+static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
+{
+/*        host->f_init = freq; 
+
+        pr_debug("%s: %s: trying to init card at %u Hz\n",
+                mmc_hostname(host), __func__, host->f_init);
+
+        mmc_power_up(host, host->ocr_avail);
+ */
+        /*
+         * Some eMMCs (with VCCQ always on) may not be reset after power up, so
+         * do a hardware reset if possible.
+         */
+  //      mmc_hw_reset_for_init(host);
+
+        /*
+         * sdio_reset sends CMD52 to reset card.  Since we do not know
+         * if the card is being re-initialized, just send it.  CMD52
+         * should be ignored by SD/eMMC cards.
+         * Skip it if we already know that we do not support SDIO commands
+         */
+   /*     if (!(host->caps2 & MMC_CAP2_NO_SDIO))
+                sdio_reset(host);
+
+        mmc_go_idle(host);
+
+        if (!(host->caps2 & MMC_CAP2_NO_SD))
+                mmc_send_if_cond(host, host->ocr_avail);
+*/
+        /* Order's important: probe SDIO, then SD, then MMC */
+  /*      if (!(host->caps2 & MMC_CAP2_NO_SDIO))
+               if (!mmc_attach_sdio(host))
+                {
+                        return 0;
+                }
+
+
+
+        if (!(host->caps2 & MMC_CAP2_NO_SD))
+                if (!mmc_attach_sd(host))
+                        return 0;
+
+        if (!(host->caps2 & MMC_CAP2_NO_MMC))
+                if (!mmc_attach_mmc(host))
+                        return 0;
+
+        mmc_power_off(host);
+    */    return -EIO;
+}
+
+
+
 void mmc_rescan(struct work_struct *work)
 {
         struct mmc_host *host =
@@ -85,47 +247,47 @@ void mmc_rescan(struct work_struct *work)
 
         if (host->trigger_card_event && host->ops->card_event) {
                 mmc_claim_host(host);
-  //              host->ops->card_event(host);
-  //              mmc_release_host(host);
-  //              host->trigger_card_event = false;
+                host->ops->card_event(host);
+                mmc_release_host(host);
+                host->trigger_card_event = false;
         }
 
-  //      mmc_bus_get(host);
+        mmc_bus_get(host);
 
         /*
          * if there is a _removable_ card registered, check whether it is
          * still present
          */
-  //      if (host->bus_ops && !host->bus_dead && mmc_card_is_removable(host))
-  //              host->bus_ops->detect(host);
+        if (host->bus_ops && !host->bus_dead && mmc_card_is_removable(host))
+                host->bus_ops->detect(host);
 
-  //      host->detect_change = 0;
+        host->detect_change = 0;
 
         /*
          * Let mmc_bus_put() free the bus/bus_ops if we've found that
          * the card is no longer present.
          */
-//        mmc_bus_put(host);
-//        mmc_bus_get(host);
+        mmc_bus_put(host);
+        mmc_bus_get(host);
 
         /* if there still is a card present, stop here */
-/*        if (host->bus_ops != NULL) {
+        if (host->bus_ops != NULL) {
                 mmc_bus_put(host);
-                goto out;
+//                goto out;
         }
-*/
+
         /*
          * Only we can add a new handler, so it's safe to
          * release the lock here.
          */
-/*        mmc_bus_put(host);
+        mmc_bus_put(host);
 
         mmc_claim_host(host);
         if (mmc_card_is_removable(host) && host->ops->get_cd &&
                         host->ops->get_cd(host) == 0) {
                 mmc_power_off(host);
                 mmc_release_host(host);
-                goto out;
+ //               goto out;
         }
 
         for (i = 0; i < ARRAY_SIZE(freqs); i++) {
@@ -134,12 +296,12 @@ void mmc_rescan(struct work_struct *work)
                 if (freqs[i] <= host->f_min)
                         break;
         }
-        mmc_release_host(host);
+//        mmc_release_host(host);
 
- out:
-        if (host->caps & MMC_CAP_NEEDS_POLL)
-                mmc_schedule_delayed_work(&host->detect, HZ); 
-*/
+// out:
+ //       if (host->caps & MMC_CAP_NEEDS_POLL)
+ //               mmc_schedule_delayed_work(&host->detect, HZ); 
+
 }
 
 /*      
@@ -220,4 +382,31 @@ int __mmc_claim_host(struct mmc_host *host, struct mmc_ctx *ctx,
 }
 EXPORT_SYMBOL(__mmc_claim_host);
 
+/**
+ *      mmc_release_host - release a host
+ *      @host: mmc host to release
+ *
+ *      Release a MMC host, allowing others to claim the host
+ *      for their operations.
+ */
+void mmc_release_host(struct mmc_host *host)
+{
+        unsigned long flags;
 
+        WARN_ON(!host->claimed);
+
+        spin_lock_irqsave(&host->lock, flags);
+        if (--host->claim_cnt) {
+                /* Release for nested claim */
+                spin_unlock_irqrestore(&host->lock, flags);
+        } else {
+                host->claimed = 0;
+                host->claimer->task = NULL;
+                host->claimer = NULL;
+                spin_unlock_irqrestore(&host->lock, flags);
+                wake_up(&host->wq);
+                pm_runtime_mark_last_busy(mmc_dev(host));
+                pm_runtime_put_autosuspend(mmc_dev(host));
+        }
+}
+EXPORT_SYMBOL(mmc_release_host);
