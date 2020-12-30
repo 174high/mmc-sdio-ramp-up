@@ -69,14 +69,14 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
         host->parent = dev;
 
         alias_id = mmc_get_reserved_index(host);
-  /*      if (alias_id >= 0)
+        if (alias_id >= 0)
                 err = ida_simple_get(&mmc_host_ida, alias_id,
                                         alias_id + 1, GFP_KERNEL);
         else
                 err = ida_simple_get(&mmc_host_ida,
                                         mmc_first_nonreserved_index(),
                                         0, GFP_KERNEL);
-      if (err < 0) {
+       if (err < 0) {
                 kfree(host);
                 return NULL;
         }
@@ -98,10 +98,10 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
         }
 
         spin_lock_init(&host->lock);
-        init_waitqueue_head(&host->wq); */
+        init_waitqueue_head(&host->wq); 
     //    INIT_DELAYED_WORK(&host->detect, mmc_rescan);
-    //    INIT_DELAYED_WORK(&host->sdio_irq_work, sdio_irq_work);
-    //    timer_setup(&host->retune_timer, mmc_retune_timer, 0);
+    // shijonn    INIT_DELAYED_WORK(&host->sdio_irq_work, sdio_irq_work);
+    // shijonn    timer_setup(&host->retune_timer, mmc_retune_timer, 0);
 
         /*
          * By default, hosts do not support SGIO or large requests.

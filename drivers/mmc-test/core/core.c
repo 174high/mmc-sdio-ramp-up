@@ -41,6 +41,13 @@
 
 #include "core.h"
 
+/* The max erase timeout, used when host->max_busy_timeout isn't specified */
+#define MMC_ERASE_TIMEOUT_MS    (60 * 1000) /* 60 s */
+
+static const unsigned freqs[] = { 400000, 300000, 200000, 100000 };
+
+static int __mmc_max_reserved_idx = -1;
+
 /*
  * mmc_get_reserved_index() - get the index reserved for this host
  * Return: The index reserved for this host or negative error value
@@ -52,4 +59,12 @@ int mmc_get_reserved_index(struct mmc_host *host)
 }
 EXPORT_SYMBOL(mmc_get_reserved_index);
 
-
+/*
+ * mmc_first_nonreserved_index() - get the first index that
+ * is not reserved
+ */
+int mmc_first_nonreserved_index(void)
+{
+        return __mmc_max_reserved_idx + 1;
+}
+EXPORT_SYMBOL(mmc_first_nonreserved_index);
