@@ -3,5 +3,8 @@
 # Makefile for the kernel mmc core.
 #
 
-#obj-$(CONFIG_MMC)		+= mmc_core.o
+obj-$(CONFIG_MMC_LT)		+= mmc_core.o
+
+mmc_core-y                      := core.o host.o \
+				slot-gpio.o
 

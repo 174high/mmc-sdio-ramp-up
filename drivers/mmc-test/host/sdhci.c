@@ -393,6 +393,7 @@ void sdhci_set_clock(struct sdhci_host *host, unsigned int clock)
 }
 EXPORT_SYMBOL_GPL(sdhci_set_clock);
 
+
 struct sdhci_host *sdhci_alloc_host(struct device *dev,
         size_t priv_size)
 {
@@ -401,7 +402,7 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 
         WARN_ON(dev == NULL);
 
- //       mmc = mmc_alloc_host(sizeof(struct sdhci_host) + priv_size, dev);
+        mmc = mmc_alloc_host(sizeof(struct sdhci_host) + priv_size, dev);
         if (!mmc)
                 return ERR_PTR(-ENOMEM);
 

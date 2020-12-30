@@ -1,3 +1,9 @@
+this is based on linux-4.19.35 imx6
+
+make modules -j16
+
+/run/media/mmcblk1p1
+
 
 
 if you want to insmod our *.ko , we need change the platform_device (compatible=fsl,imx6ull-usdhc-test) on the device tree
