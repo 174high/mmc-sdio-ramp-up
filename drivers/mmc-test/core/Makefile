@@ -6,7 +6,7 @@
 obj-$(CONFIG_MMC_LT)		+= mmc_core.o
 
 mmc_core-y                      := core.o host.o \
-				slot-gpio.o \
+				mmc_ops.o slot-gpio.o \
 				sdio_ops.o
 
 mmc_core-$(CONFIG_OF)           += pwrseq.o
