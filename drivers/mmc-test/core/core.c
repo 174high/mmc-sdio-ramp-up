@@ -143,6 +143,7 @@ void mmc_set_chip_select(struct mmc_host *host, int mode)
         mmc_set_ios(host);
 }
 
+
 /*
  * Set initial state after a power cycle or a hw_reset.
  */
@@ -1059,3 +1060,147 @@ u32 mmc_select_voltage(struct mmc_host *host, u32 ocr)
 
         return ocr;
 }
+
+/*
+ * This is a helper function, which fetches a runtime pm reference for the
+ * card device and also claims the host.
+ */
+void mmc_get_card(struct mmc_card *card, struct mmc_ctx *ctx)
+{
+        pm_runtime_get_sync(&card->dev);
+        __mmc_claim_host(card->host, ctx, NULL);
+}
+EXPORT_SYMBOL(mmc_get_card);
+
+/*
+ * This is a helper function, which releases the host and drops the runtime
+ * pm reference for the card device.
+ */
+void mmc_put_card(struct mmc_card *card, struct mmc_ctx *ctx)
+{
+        struct mmc_host *host = card->host;
+
+        WARN_ON(ctx && host->claimer != ctx);
+
+        mmc_release_host(host);
+        pm_runtime_mark_last_busy(&card->dev);
+        pm_runtime_put_autosuspend(&card->dev);
+}
+EXPORT_SYMBOL(mmc_put_card);
+
+static int mmc_of_get_func_num(struct device_node *node)
+{
+        u32 reg;
+        int ret;
+
+        ret = of_property_read_u32(node, "reg", &reg);
+        if (ret < 0)
+                return ret;
+
+        return reg;
+}
+
+struct device_node *mmc_of_find_child_device(struct mmc_host *host,
+                unsigned func_num)
+{
+        struct device_node *node;
+
+        if (!host->parent || !host->parent->of_node)
+                return NULL;
+
+        for_each_child_of_node(host->parent->of_node, node) {
+                if (mmc_of_get_func_num(node) == func_num)
+                        return node;
+        }
+
+        return NULL;
+}
+
+int mmc_host_set_uhs_voltage(struct mmc_host *host)
+{
+        u32 clock;
+
+        /*
+         * During a signal voltage level switch, the clock must be gated
+         * for 5 ms according to the SD spec
+         */
+        clock = host->ios.clock;
+        host->ios.clock = 0;
+        mmc_set_ios(host);
+
+        if (mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_180))
+                return -EAGAIN;
+
+        /* Keep clock gated for at least 10 ms, though spec only says 5 ms */
+        mmc_delay(10);
+        host->ios.clock = clock;
+        mmc_set_ios(host);
+
+        return 0;
+}
+
+int mmc_set_uhs_voltage(struct mmc_host *host, u32 ocr)
+{
+        struct mmc_command cmd = {};
+        int err = 0;
+
+        /*
+         * If we cannot switch voltages, return failure so the caller
+         * can continue without UHS mode
+         */
+        if (!host->ops->start_signal_voltage_switch)
+                return -EPERM;
+        if (!host->ops->card_busy)
+                pr_warn("%s: cannot verify signal voltage switch\n",
+                        mmc_hostname(host));
+
+        cmd.opcode = SD_SWITCH_VOLTAGE;
+        cmd.arg = 0;
+        cmd.flags = MMC_RSP_R1 | MMC_CMD_AC;
+
+        err = mmc_wait_for_cmd(host, &cmd, 0);
+        if (err)
+                return err;
+
+        if (!mmc_host_is_spi(host) && (cmd.resp[0] & R1_ERROR))
+                return -EIO;
+
+        /*
+         * The card should drive cmd and dat[0:3] low immediately
+         * after the response of cmd11, but wait 1 ms to be sure
+         */
+        mmc_delay(1);
+        if (host->ops->card_busy && !host->ops->card_busy(host)) {
+                err = -EAGAIN;
+                goto power_cycle;
+        }
+
+        if (mmc_host_set_uhs_voltage(host)) {
+                /*
+                 * Voltages may not have been switched, but we've already
+                 * sent CMD11, so a power cycle is required anyway
+                 */
+                err = -EAGAIN;
+                goto power_cycle;
+        }
+
+        /* Wait for at least 1 ms according to spec */
+        mmc_delay(1);
+
+        /*
+         * Failure to switch is indicated by the card holding
+         * dat[0:3] low
+         */
+        if (host->ops->card_busy && host->ops->card_busy(host))
+                err = -EAGAIN;
+
+power_cycle:
+        if (err) {
+                pr_debug("%s: Signal voltage switch failed, "
+                        "power cycling card\n", mmc_hostname(host));
+                mmc_power_cycle(host, ocr);
+        }
+
+        return err;
+}
+

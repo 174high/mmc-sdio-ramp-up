@@ -27,9 +27,9 @@
 #include "core.h"
 //#include "card.h"
 #include "host.h"
-//#include "bus.h"
+#include "bus.h"
 //#include "quirks.h"
-//#include "sd.h"
+#include "sd.h"
 //#include "sdio_bus.h"
 #include "mmc_ops.h"
 //#include "sd_ops.h"
@@ -96,7 +96,7 @@ try_again:
         /*
          * Allocate card structure.
          */
-      /*  card = mmc_alloc_card(host, NULL);
+        card = mmc_alloc_card(host, NULL);
         if (IS_ERR(card)) {
                 err = PTR_ERR(card);
                 goto err;
@@ -104,21 +104,21 @@ try_again:
 
         if ((rocr & R4_MEMORY_PRESENT) &&
             mmc_sd_get_cid(host, ocr & rocr, card->raw_cid, NULL) == 0) {
-                card->type = MMC_TYPE_SD_COMBO;
+       /*         card->type = MMC_TYPE_SD_COMBO;
 
                 if (oldcard && (oldcard->type != MMC_TYPE_SD_COMBO ||
                     memcmp(card->raw_cid, oldcard->raw_cid, sizeof(card->raw_cid)) != 0)) {
                         mmc_remove_card(card);
                         return -ENOENT;
-                }
+                } */
         } else {
-                card->type = MMC_TYPE_SDIO;
+          /*      card->type = MMC_TYPE_SDIO;
 
                 if (oldcard && oldcard->type != MMC_TYPE_SDIO) {
                         mmc_remove_card(card);
                         return -ENOENT;
-                }
-        } */
+                } */
+        } 
         /*
          * Call the optional HC's init_card function to handle quirks.
          */

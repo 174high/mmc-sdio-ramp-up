@@ -412,6 +412,106 @@ out:
         return err;
 }
 
+/*
+ * NOTE: void *buf, caller for the buf is required to use DMA-capable
+ * buffer or on-stack buffer (with some overhead in callee).
+ */
+static int
+mmc_send_cxd_data(struct mmc_card *card, struct mmc_host *host,
+                u32 opcode, void *buf, unsigned len)
+{
+        struct mmc_request mrq = {};
+        struct mmc_command cmd = {};
+        struct mmc_data data = {};
+        struct scatterlist sg;
+
+        mrq.cmd = &cmd;
+        mrq.data = &data;
+
+        cmd.opcode = opcode;
+        cmd.arg = 0;
+
+        /* NOTE HACK:  the MMC_RSP_SPI_R1 is always correct here, but we
+         * rely on callers to never use this with "native" calls for reading
+         * CSD or CID.  Native versions of those commands use the R2 type,
+         * not R1 plus a data block.
+         */
+        cmd.flags = MMC_RSP_SPI_R1 | MMC_RSP_R1 | MMC_CMD_ADTC;
+
+        data.blksz = len;
+        data.blocks = 1;
+        data.flags = MMC_DATA_READ;
+        data.sg = &sg;
+        data.sg_len = 1;
+
+        sg_init_one(&sg, buf, len);
+
+        if (opcode == MMC_SEND_CSD || opcode == MMC_SEND_CID) {
+                /*
+                 * The spec states that CSR and CID accesses have a timeout
+                 * of 64 clock cycles.
+                 */
+                data.timeout_ns = 0;
+                data.timeout_clks = 64;
+        } else
+                mmc_set_data_timeout(&data, card);
+
+        mmc_wait_for_req(host, &mrq);
+
+        if (cmd.error) 
+                return cmd.error;
+        if (data.error)
+                return data.error;
+
+        return 0;
+}
 
 
+static int mmc_spi_send_cid(struct mmc_host *host, u32 *cid)
+{
+        int ret, i;
+        __be32 *cid_tmp;
 
+        cid_tmp = kzalloc(16, GFP_KERNEL);
+        if (!cid_tmp)
+                return -ENOMEM;
+
+        ret = mmc_send_cxd_data(NULL, host, MMC_SEND_CID, cid_tmp, 16);
+        if (ret)
+                goto err;
+
+        for (i = 0; i < 4; i++)
+                cid[i] = be32_to_cpu(cid_tmp[i]);
+
+err:
+        kfree(cid_tmp);
+        return ret; 
+}
+
+static int
+mmc_send_cxd_native(struct mmc_host *host, u32 arg, u32 *cxd, int opcode)
+{
+        int err;
+        struct mmc_command cmd = {};
+
+        cmd.opcode = opcode;
+        cmd.arg = arg;
+        cmd.flags = MMC_RSP_R2 | MMC_CMD_AC;
+
+        err = mmc_wait_for_cmd(host, &cmd, MMC_CMD_RETRIES);
+        if (err)
+                return err;
+
+        memcpy(cxd, cmd.resp, sizeof(u32) * 4);
+
+        return 0;
+}
+
+
+int mmc_send_cid(struct mmc_host *host, u32 *cid)
+{
+        if (mmc_host_is_spi(host))
+                return mmc_spi_send_cid(host, cid);
+
+        return mmc_send_cxd_native(host, 0, cid, MMC_ALL_SEND_CID);
+}
