@@ -302,6 +302,54 @@ static int mmc_mrq_prep(struct mmc_host *host, struct mmc_request *mrq)
         return 0;
 }
 
+static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
+{
+        int err;
+
+        /* Assumes host controller has been runtime resumed by mmc_claim_host */
+        err = mmc_retune(host);
+        if (err) {
+                mrq->cmd->error = err; 
+// shijonn                mmc_request_done(host, mrq);
+                return;
+        }
+
+        /*
+         * For sdio rw commands we must wait for card busy otherwise some
+         * sdio devices won't work properly.
+         * And bypass I/O abort, reset and bus suspend operations.
+         */
+ //       if (sdio_is_io_busy(mrq->cmd->opcode, mrq->cmd->arg) &&
+ //           host->ops->card_busy) {
+//                int tries = 500; /* Wait aprox 500ms at maximum */
+/*    
+                while (host->ops->card_busy(host) && --tries)
+                        mmc_delay(1);
+
+                if (tries == 0) {
+                        mrq->cmd->error = -EBUSY;
+                        mmc_request_done(host, mrq);
+                        return;
+                }
+        }
+
+        if (mrq->cap_cmd_during_tfr) {
+                host->ongoing_mrq = mrq;
+  */              /*
+                 * Retry path could come through here without having waiting on
+                 * cmd_completion, so ensure it is reinitialised.
+                 */
+ /*               reinit_completion(&mrq->cmd_completion);
+        }
+
+        trace_mmc_request_start(host, mrq);
+
+        if (host->cqe_on)
+                host->cqe_ops->cqe_off(host);
+
+        host->ops->request(host, mrq); */
+}
+
 int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 {
         int err;
@@ -320,10 +368,10 @@ int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
         err = mmc_mrq_prep(host, mrq);
         if (err)
                 return err;
-/*
+
         led_trigger_event(host->led, LED_FULL);
         __mmc_start_request(host, mrq);
-*/
+
         return 0;
 }
 EXPORT_SYMBOL(mmc_start_request);
@@ -689,3 +737,103 @@ void mmc_release_host(struct mmc_host *host)
         }
 }
 EXPORT_SYMBOL(mmc_release_host);
+
+/*
+ * Sets the host clock to the highest possible frequency that
+ * is below "hz".
+ */
+void mmc_set_clock(struct mmc_host *host, unsigned int hz)
+{
+        WARN_ON(hz && hz < host->f_min);
+
+        if (hz > host->f_max)
+                hz = host->f_max;
+
+        host->ios.clock = hz;
+        mmc_set_ios(host);
+}
+
+int mmc_hs400_to_hs200(struct mmc_card *card)
+{
+        struct mmc_host *host = card->host;
+        unsigned int max_dtr;
+        int err;
+        u8 val;
+
+        /* Reduce frequency to HS */
+        max_dtr = card->ext_csd.hs_max_dtr;
+        mmc_set_clock(host, max_dtr);
+
+        /* Switch HS400 to HS DDR */
+        val = EXT_CSD_TIMING_HS;
+        err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_HS_TIMING,
+                           val, card->ext_csd.generic_cmd6_time, 0,
+                           true, false, true);
+    /*    if (err)
+                goto out_err;
+
+        mmc_set_timing(host, MMC_TIMING_MMC_DDR52);
+
+        err = mmc_switch_status(card);
+        if (err)
+                goto out_err;
+   */
+        /* Switch HS DDR to HS */
+    /*    err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_BUS_WIDTH,
+                           EXT_CSD_BUS_WIDTH_8, card->ext_csd.generic_cmd6_time,
+                           0, true, false, true);
+        if (err)
+                goto out_err;
+
+        mmc_set_timing(host, MMC_TIMING_MMC_HS);
+
+        if (host->ops->hs400_downgrade)
+               host->ops->hs400_downgrade(host);
+
+        err = mmc_switch_status(card);
+        if (err)
+                goto out_err;
+    */
+        /* Switch HS to HS200 */
+    /*    val = EXT_CSD_TIMING_HS200 |
+              card->drive_strength << EXT_CSD_DRV_STR_SHIFT;
+        err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_HS_TIMING,
+                           val, card->ext_csd.generic_cmd6_time, 0,
+                           true, false, true);
+        if (err)
+                goto out_err;
+
+        mmc_set_timing(host, MMC_TIMING_MMC_HS200);
+   */
+        /*
+         * For HS200, CRC errors are not a reliable way to know the switch
+         * failed. If there really is a problem, we would expect tuning will
+         * fail and the result ends up the same.
+         */
+     /*   err = __mmc_switch_status(card, false);
+        if (err)
+                goto out_err;
+
+        mmc_set_bus_speed(card);
+    */
+        /* Prepare tuning for HS400 mode. */
+     //   if (host->ops->prepare_hs400_tuning)
+     //           host->ops->prepare_hs400_tuning(host, &host->ios);
+
+        return 0;
+
+out_err:
+        pr_err("%s: %s failed, error %d\n", mmc_hostname(card->host),
+               __func__, err);
+ 
+        return err;
+}
+
+/*
+ * Select timing parameters for host.
+ */
+void mmc_set_timing(struct mmc_host *host, unsigned int timing)
+{
+        host->ios.timing = timing;
+        mmc_set_ios(host);
+}

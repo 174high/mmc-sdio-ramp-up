@@ -155,3 +155,40 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
 }
 
 EXPORT_SYMBOL(mmc_alloc_host);
+
+int mmc_retune(struct mmc_host *host)
+{
+        bool return_to_hs400 = false;
+        int err;
+
+        if (host->retune_now)
+                host->retune_now = 0;
+        else
+                return 0;
+
+        if (!host->need_retune || host->doing_retune || !host->card)
+                return 0;
+ 
+        host->need_retune = 0;
+
+        host->doing_retune = 1;
+
+        if (host->ios.timing == MMC_TIMING_MMC_HS400) {
+                err = mmc_hs400_to_hs200(host->card);
+                if (err)
+                        goto out;
+
+                return_to_hs400 = true;
+        }
+/*
+        err = mmc_execute_tuning(host->card);
+        if (err)
+                goto out;
+
+        if (return_to_hs400)
+                err = mmc_hs200_to_hs400(host->card);
+*/out:
+        host->doing_retune = 0;
+
+        return err;
+}
