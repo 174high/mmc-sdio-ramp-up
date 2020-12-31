@@ -56,6 +56,9 @@ static const unsigned freqs[] = { 400000, 300000, 200000, 100000 };
 
 static int __mmc_max_reserved_idx = -1;
 
+bool use_spi_crc = 1;
+module_param(use_spi_crc, bool, 0);
+
 /*
  * mmc_get_reserved_index() - get the index reserved for this host
  * Return: The index reserved for this host or negative error value

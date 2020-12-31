@@ -26,12 +26,12 @@
 
 #include "core.h"
 //#include "card.h"
-//#include "host.h"
+#include "host.h"
 //#include "bus.h"
 //#include "quirks.h"
 //#include "sd.h"
 //#include "sdio_bus.h"
-//#include "mmc_ops.h"
+#include "mmc_ops.h"
 //#include "sd_ops.h"
 #include "sdio_ops.h"
 //#include "sdio_cis.h"
@@ -67,31 +67,31 @@ static int mmc_sdio_init_card(struct mmc_host *host, u32 ocr,
         WARN_ON(!host->claimed);
 
         /* to query card if 1.8V signalling is supported */
-     //   if (mmc_host_uhs(host))
-     //           ocr |= R4_18V_PRESENT;
+        if (mmc_host_uhs(host))
+                ocr |= R4_18V_PRESENT;
 
-//try_again:
-  //      if (!retries) {
-  //              pr_warn("%s: Skipping voltage switch\n", mmc_hostname(host));
-  //              ocr &= ~R4_18V_PRESENT;
-   //     }
+try_again:
+        if (!retries) {
+                pr_warn("%s: Skipping voltage switch\n", mmc_hostname(host));
+                ocr &= ~R4_18V_PRESENT;
+        }
 
         /*
          * Inform the card of the voltage
          */
-   //     if (!powered_resume) {
-   //             err = mmc_send_io_op_cond(host, ocr, &rocr);
-   //             if (err)
-   //                     goto err;
-   //     }
+        if (!powered_resume) {
+                err = mmc_send_io_op_cond(host, ocr, &rocr);
+                if (err)
+                        goto err;
+        }
         /*
          * For SPI, enable CRC as appropriate.
          */
-  //      if (mmc_host_is_spi(host)) {
-  //              err = mmc_spi_set_crc(host, use_spi_crc);
-  //              if (err)
-  //                      goto err;
-  //      }
+        if (mmc_host_is_spi(host)) {
+                err = mmc_spi_set_crc(host, use_spi_crc);
+                if (err)
+                        goto err;
+        }
 
         /*
          * Allocate card structure.

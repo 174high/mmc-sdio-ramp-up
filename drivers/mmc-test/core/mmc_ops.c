@@ -24,7 +24,35 @@
 
 #define MMC_OPS_TIMEOUT_MS      (10 * 60 * 1000) /* 10 minute timeout */
 
+int mmc_spi_read_ocr(struct mmc_host *host, int highcap, u32 *ocrp)
+{
+        struct mmc_command cmd = {};
+        int err;
 
+        cmd.opcode = MMC_SPI_READ_OCR;
+        cmd.arg = highcap ? (1 << 30) : 0;
+        cmd.flags = MMC_RSP_SPI_R3;
+
+        err = mmc_wait_for_cmd(host, &cmd, 0);
+
+        *ocrp = cmd.resp[1];
+        return err;
+}
+
+int mmc_spi_set_crc(struct mmc_host *host, int use_crc)
+{
+        struct mmc_command cmd = {};
+        int err;
+
+        cmd.opcode = MMC_SPI_CRC_ON_OFF;
+        cmd.flags = MMC_RSP_SPI_R1;
+        cmd.arg = use_crc;
+
+        err = mmc_wait_for_cmd(host, &cmd, 0);
+        if (!err)
+                host->use_spi_crc = use_crc;
+        return err;
+}
 
 int mmc_go_idle(struct mmc_host *host)
 {
