@@ -687,12 +687,12 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
                 mmc_send_if_cond(host, host->ocr_avail);
 
         /* Order's important: probe SDIO, then SD, then MMC */
-  /*      if (!(host->caps2 & MMC_CAP2_NO_SDIO))
+        if (!(host->caps2 & MMC_CAP2_NO_SDIO))
                if (!mmc_attach_sdio(host))
                 {
                         return 0;
                 }
-
+/*
 
 
         if (!(host->caps2 & MMC_CAP2_NO_SD))
@@ -987,4 +987,72 @@ void mmc_set_timing(struct mmc_host *host, unsigned int timing)
 {
         host->ios.timing = timing;
         mmc_set_ios(host);
+}
+
+/*
+ * Assign a mmc bus handler to a host. Only one bus handler may control a
+ * host at any given time.
+ */     
+void mmc_attach_bus(struct mmc_host *host, const struct mmc_bus_ops *ops)
+{
+        unsigned long flags;
+
+        WARN_ON(!host->claimed);
+
+        spin_lock_irqsave(&host->lock, flags);
+
+        WARN_ON(host->bus_ops);
+        WARN_ON(host->bus_refs);
+
+        host->bus_ops = ops;
+        host->bus_refs = 1;
+        host->bus_dead = 0;
+
+        spin_unlock_irqrestore(&host->lock, flags);
+}
+
+void mmc_power_cycle(struct mmc_host *host, u32 ocr)
+{
+        mmc_power_off(host);
+        /* Wait at least 1 ms according to SD spec */
+        mmc_delay(1);
+        mmc_power_up(host, ocr);
+}
+
+/*
+ * Mask off any voltages we don't support and select
+ * the lowest voltage
+ */
+u32 mmc_select_voltage(struct mmc_host *host, u32 ocr)
+{
+        int bit;
+
+        /*
+         * Sanity check the voltages that the card claims to
+         * support.
+         */
+        if (ocr & 0x7F) {
+                dev_warn(mmc_dev(host),
+                "card claims to support voltages below defined range\n");
+                ocr &= ~0x7F;
+        }
+
+        ocr &= host->ocr_avail;
+        if (!ocr) {
+                dev_warn(mmc_dev(host), "no support for card's volts\n");
+                return 0;
+        }
+
+        if (host->caps2 & MMC_CAP2_FULL_PWR_CYCLE) {
+                bit = ffs(ocr) - 1;
+                ocr &= 3 << bit;
+                mmc_power_cycle(host, ocr);
+        } else {
+                bit = fls(ocr) - 1;
+                ocr &= 3 << bit;
+                if (bit != host->ios.vdd)
+                        dev_warn(mmc_dev(host), "exceeding card's volts\n");
+        }
+
+        return ocr;
 }
