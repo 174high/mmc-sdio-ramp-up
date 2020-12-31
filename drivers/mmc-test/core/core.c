@@ -46,6 +46,7 @@
 #include "pwrseq.h"
 
 #include "mmc_ops.h"
+#include "sd_ops.h"
 #include "sdio_ops.h"
 
 /* The max erase timeout, used when host->max_busy_timeout isn't specified */
@@ -381,6 +382,12 @@ static void mmc_wait_done(struct mmc_request *mrq)
         complete(&mrq->completion);
 }
 
+static inline void mmc_complete_cmd(struct mmc_request *mrq)
+{       
+        if (mrq->cap_cmd_during_tfr && !completion_done(&mrq->cmd_completion))
+                complete_all(&mrq->cmd_completion);
+} 
+
 static int __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
 {
         int err;
@@ -391,14 +398,58 @@ static int __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
         mrq->done = mmc_wait_done;
 
         err = mmc_start_request(host, mrq);
-/*        if (err) {
+        if (err) {
                 mrq->cmd->error = err;
                 mmc_complete_cmd(mrq);
                 complete(&mrq->completion);
         }
- */
+ 
         return err;
 }
+
+void mmc_wait_for_req_done(struct mmc_host *host, struct mmc_request *mrq)
+{
+        struct mmc_command *cmd;
+
+        while (1) {
+                wait_for_completion(&mrq->completion);
+
+                cmd = mrq->cmd;
+
+                /*
+                 * If host has timed out waiting for the sanitize
+                 * to complete, card might be still in programming state
+                 * so let's try to bring the card out of programming
+                 * state.
+                 */
+                if (cmd->sanitize_busy && cmd->error == -ETIMEDOUT) {
+                        if (!mmc_interrupt_hpi(host->card)) {
+                                pr_warn("%s: %s: Interrupted sanitize\n",
+                                        mmc_hostname(host), __func__);
+                                cmd->error = 0;
+                                break;
+                        } else {
+                                pr_err("%s: %s: Failed to interrupt sanitize\n",
+                                       mmc_hostname(host), __func__);
+                        } 
+                }
+                if (!cmd->error || !cmd->retries ||
+                    mmc_card_removed(host->card))
+                        break;
+                
+                mmc_retune_recheck(host);
+                
+                pr_debug("%s: req failed (CMD%u): %d, retrying...\n",
+                         mmc_hostname(host), cmd->opcode, cmd->error);
+                cmd->retries--;
+                cmd->error = 0;
+                __mmc_start_request(host, mrq);
+        }
+
+        mmc_retune_release(host);
+}
+EXPORT_SYMBOL(mmc_wait_for_req_done);
+
 
 /**
  *      mmc_wait_for_req - start a request and wait for completion
@@ -416,8 +467,8 @@ void mmc_wait_for_req(struct mmc_host *host, struct mmc_request *mrq)
 {
         __mmc_start_req(host, mrq);
 
-  // shijonn      if (!mrq->cap_cmd_during_tfr)
-  // shijonn             mmc_wait_for_req_done(host, mrq);
+        if (!mrq->cap_cmd_during_tfr)
+               mmc_wait_for_req_done(host, mrq);
 }
 EXPORT_SYMBOL(mmc_wait_for_req);
 
@@ -481,18 +532,18 @@ void mmc_power_up(struct mmc_host *host, u32 ocr)
          */
         mmc_delay(host->ios.power_delay_ms);
 
-     //   mmc_pwrseq_post_power_on(host);
+        mmc_pwrseq_post_power_on(host);
 
-     //   host->ios.clock = host->f_init;
+        host->ios.clock = host->f_init;
 
-    //    host->ios.power_mode = MMC_POWER_ON;
-    //    mmc_set_ios(host);
+        host->ios.power_mode = MMC_POWER_ON;
+        mmc_set_ios(host);
 
         /*
          * This delay must be at least 74 clock sizes, or 1 ms, or the
          * time required to reach a stable voltage.
          */
-  //      mmc_delay(host->ios.power_delay_ms);
+        mmc_delay(host->ios.power_delay_ms);
 }
 
 static void mmc_hw_reset_for_init(struct mmc_host *host)
@@ -504,6 +555,106 @@ static void mmc_hw_reset_for_init(struct mmc_host *host)
         host->ops->hw_reset(host);
 }
 
+/**
+ *      mmc_set_data_timeout - set the timeout for a data command
+ *      @data: data phase for command
+ *      @card: the MMC card associated with the data transfer
+ *
+ *      Computes the data timeout parameters according to the
+ *      correct algorithm given the card type.
+ */
+void mmc_set_data_timeout(struct mmc_data *data, const struct mmc_card *card)
+{
+        unsigned int mult;
+
+        /*
+         * SDIO cards only define an upper 1 s limit on access.
+         */
+        if (mmc_card_sdio(card)) {
+                data->timeout_ns = 1000000000;
+                data->timeout_clks = 0;
+                return;
+        }
+
+        /*
+         * SD cards use a 100 multiplier rather than 10
+         */
+        mult = mmc_card_sd(card) ? 100 : 10;
+
+        /*
+         * Scale up the multiplier (and therefore the timeout) by
+         * the r2w factor for writes.
+         */
+        if (data->flags & MMC_DATA_WRITE)
+                mult <<= card->csd.r2w_factor;
+
+        data->timeout_ns = card->csd.taac_ns * mult;
+        data->timeout_clks = card->csd.taac_clks * mult;
+
+        /*
+         * SD cards also have an upper limit on the timeout.
+         */
+        if (mmc_card_sd(card)) {
+                unsigned int timeout_us, limit_us;
+
+                timeout_us = data->timeout_ns / 1000;
+                if (card->host->ios.clock)
+                        timeout_us += data->timeout_clks * 1000 /
+                                (card->host->ios.clock / 1000);
+
+                if (data->flags & MMC_DATA_WRITE)
+                        /*
+                         * The MMC spec "It is strongly recommended
+                         * for hosts to implement more than 500ms
+                         * timeout value even if the card indicates
+                         * the 250ms maximum busy length."  Even the
+                         * previous value of 300ms is known to be
+                         * insufficient for some cards.
+                         */
+                        limit_us = 3000000;
+                else
+                        limit_us = 100000;
+
+                /*
+                 * SDHC cards always use these fixed values.
+                 */
+                if (timeout_us > limit_us) {
+                        data->timeout_ns = limit_us * 1000;
+                        data->timeout_clks = 0;
+                }
+
+                /* assign limit value if invalid */
+                if (timeout_us == 0)
+                        data->timeout_ns = limit_us * 1000;
+        }
+        /*
+         * Some cards require longer data read timeout than indicated in CSD.
+         * Address this by setting the read timeout to a "reasonably high"
+         * value. For the cards tested, 600ms has proven enough. If necessary,
+         * this value can be increased if other problematic cards require this.
+         */
+        if (mmc_card_long_read_time(card) && data->flags & MMC_DATA_READ) {
+                data->timeout_ns = 600000000;
+                data->timeout_clks = 0;
+        }
+
+        /*
+         * Some cards need very high timeouts if driven in SPI mode.
+         * The worst observed timeout was 900ms after writing a
+         * continuous stream of data until the internal logic
+         * overflowed.
+         */
+         if (mmc_host_is_spi(card->host)) {
+                if (data->flags & MMC_DATA_WRITE) {
+                        if (data->timeout_ns < 1000000000)
+                                data->timeout_ns = 1000000000;  /* 1s */
+                } else {
+                        if (data->timeout_ns < 100000000)
+                                data->timeout_ns =  100000000;  /* 100ms */
+                }
+        } 
+}
+EXPORT_SYMBOL(mmc_set_data_timeout);
 
 
 static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
@@ -532,8 +683,8 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 
         mmc_go_idle(host);
 
-//        if (!(host->caps2 & MMC_CAP2_NO_SD))
-//                mmc_send_if_cond(host, host->ocr_avail);
+        if (!(host->caps2 & MMC_CAP2_NO_SD))
+                mmc_send_if_cond(host, host->ocr_avail);
 
         /* Order's important: probe SDIO, then SD, then MMC */
   /*      if (!(host->caps2 & MMC_CAP2_NO_SDIO))

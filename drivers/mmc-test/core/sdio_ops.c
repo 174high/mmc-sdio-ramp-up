@@ -29,7 +29,7 @@ int mmc_send_io_op_cond(struct mmc_host *host, u32 ocr, u32 *rocr)
 	cmd.flags = MMC_RSP_SPI_R4 | MMC_RSP_R4 | MMC_CMD_BCR;
 
 	for (i = 100; i; i--) {
-	// shijonn	err = mmc_wait_for_cmd(host, &cmd, MMC_CMD_RETRIES);
+		err = mmc_wait_for_cmd(host, &cmd, MMC_CMD_RETRIES);
 		if (err)
 			break;
 
@@ -84,7 +84,7 @@ static int mmc_io_rw_direct_host(struct mmc_host *host, int write, unsigned fn,
 	cmd.arg |= in;
 	cmd.flags = MMC_RSP_SPI_R5 | MMC_RSP_R5 | MMC_CMD_AC;
 
-// shijonn	err = mmc_wait_for_cmd(host, &cmd, 0);
+        err = mmc_wait_for_cmd(host, &cmd, 0);
 	if (err)
 		return err;
 
@@ -172,9 +172,9 @@ int mmc_io_rw_extended(struct mmc_card *card, int write, unsigned fn,
 		sg_init_one(&sg, buf, left_size);
 	}
 
-//	mmc_set_data_timeout(&data, card);
+	mmc_set_data_timeout(&data, card);
 
-//	mmc_wait_for_req(card->host, &mrq);
+	mmc_wait_for_req(card->host, &mrq);
 
 	if (nents > 1)
 		sg_free_table(&sgtable);

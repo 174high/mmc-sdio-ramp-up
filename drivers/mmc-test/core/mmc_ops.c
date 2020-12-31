@@ -288,7 +288,101 @@ out:
         return err;
 }
 
+static int mmc_send_hpi_cmd(struct mmc_card *card, u32 *status)
+{
+        struct mmc_command cmd = {};
+        unsigned int opcode;
+        int err;
 
+        if (!card->ext_csd.hpi) {
+                pr_warn("%s: Card didn't support HPI command\n",
+                        mmc_hostname(card->host));
+                return -EINVAL;
+        }
+
+        opcode = card->ext_csd.hpi_cmd;
+        if (opcode == MMC_STOP_TRANSMISSION)
+                cmd.flags = MMC_RSP_R1B | MMC_CMD_AC;
+        else if (opcode == MMC_SEND_STATUS)
+                cmd.flags = MMC_RSP_R1 | MMC_CMD_AC;
+    
+        cmd.opcode = opcode;
+        cmd.arg = card->rca << 16 | 1;
+    
+        err = mmc_wait_for_cmd(card->host, &cmd, 0);
+        if (err) {
+                pr_warn("%s: error %d interrupting operation. "
+                        "HPI command response %#x\n", mmc_hostname(card->host),
+                        err, cmd.resp[0]);
+                return err;
+        }
+        if (status)
+                *status = cmd.resp[0];
+
+        return 0;
+}
+
+/**
+ *      mmc_interrupt_hpi - Issue for High priority Interrupt
+ *      @card: the MMC card associated with the HPI transfer
+ *
+ *      Issued High Priority Interrupt, and check for card status
+ *      until out-of prg-state.
+ */
+int mmc_interrupt_hpi(struct mmc_card *card)
+{
+        int err;
+        u32 status;
+        unsigned long prg_wait;
+
+        if (!card->ext_csd.hpi_en) {
+                pr_info("%s: HPI enable bit unset\n", mmc_hostname(card->host));
+                return 1;
+        }
+
+        err = mmc_send_status(card, &status);
+        if (err) {
+                pr_err("%s: Get card status fail\n", mmc_hostname(card->host));
+                goto out;
+        }
+
+        switch (R1_CURRENT_STATE(status)) {
+        case R1_STATE_IDLE:
+        case R1_STATE_READY:
+        case R1_STATE_STBY:
+        case R1_STATE_TRAN:
+                /*
+                 * In idle and transfer states, HPI is not needed and the caller
+                 * can issue the next intended command immediately
+                 */
+                goto out;
+        case R1_STATE_PRG:
+                break;
+        default:
+                /* In all other states, it's illegal to issue HPI */
+                pr_debug("%s: HPI cannot be sent. Card state=%d\n",
+                        mmc_hostname(card->host), R1_CURRENT_STATE(status));
+                err = -EINVAL;
+                goto out;
+        }
+
+        err = mmc_send_hpi_cmd(card, &status);
+        if (err)
+                goto out;
+
+        prg_wait = jiffies + msecs_to_jiffies(card->ext_csd.out_of_int_time);
+        do {
+                err = mmc_send_status(card, &status);
+
+                if (!err && R1_CURRENT_STATE(status) == R1_STATE_TRAN)
+                        break;
+                if (time_after(jiffies, prg_wait))
+                        err = -ETIMEDOUT;
+        } while (!err);
+
+out:
+        return err;
+}
 
 
 
