@@ -40,10 +40,12 @@
 #include <trace/events/mmc.h>
 
 #include "core.h"
+#include "card.h"
 #include "host.h"
 
 #include "pwrseq.h"
 
+#include "mmc_ops.h"
 #include "sdio_ops.h"
 
 /* The max erase timeout, used when host->max_busy_timeout isn't specified */
@@ -129,6 +131,15 @@ static inline void mmc_set_ios(struct mmc_host *host)
 } 
 
 /*
+ * Control chip select pin on a host.
+ */
+void mmc_set_chip_select(struct mmc_host *host, int mode)
+{
+        host->ios.chip_select = mode;
+        mmc_set_ios(host);
+}
+
+/*
  * Set initial state after a power cycle or a hw_reset.
  */
 void mmc_set_initial_state(struct mmc_host *host)
@@ -208,6 +219,189 @@ void mmc_set_initial_signal_voltage(struct mmc_host *host)
                 dev_dbg(mmc_dev(host), "Initial signal voltage of 1.2v\n");
 }
 
+static inline void mmc_wait_ongoing_tfr_cmd(struct mmc_host *host)
+{
+        struct mmc_request *ongoing_mrq = READ_ONCE(host->ongoing_mrq);
+
+        /*
+         * If there is an ongoing transfer, wait for the command line to become
+         * available.
+         */
+        if (ongoing_mrq && !completion_done(&ongoing_mrq->cmd_completion))
+                wait_for_completion(&ongoing_mrq->cmd_completion);
+}
+
+static void mmc_mrq_pr_debug(struct mmc_host *host, struct mmc_request *mrq,
+                             bool cqe)
+{
+        if (mrq->sbc) {
+                pr_debug("<%s: starting CMD%u arg %08x flags %08x>\n",
+                         mmc_hostname(host), mrq->sbc->opcode,
+                         mrq->sbc->arg, mrq->sbc->flags);
+        }
+
+        if (mrq->cmd) {
+                pr_debug("%s: starting %sCMD%u arg %08x flags %08x\n",
+                         mmc_hostname(host), cqe ? "CQE direct " : "",
+                         mrq->cmd->opcode, mrq->cmd->arg, mrq->cmd->flags);
+        } else if (cqe) {
+                pr_debug("%s: starting CQE transfer for tag %d blkaddr %u\n",
+                         mmc_hostname(host), mrq->tag, mrq->data->blk_addr);
+        }
+
+        if (mrq->data) { 
+                pr_debug("%s:     blksz %d blocks %d flags %08x "
+                        "tsac %d ms nsac %d\n",
+                        mmc_hostname(host), mrq->data->blksz,
+                        mrq->data->blocks, mrq->data->flags,
+                        mrq->data->timeout_ns / 1000000,
+                        mrq->data->timeout_clks);
+        }
+
+        if (mrq->stop) {
+                pr_debug("%s:     CMD%u arg %08x flags %08x\n",
+                         mmc_hostname(host), mrq->stop->opcode,
+                         mrq->stop->arg, mrq->stop->flags);
+        }
+}
+
+static int mmc_mrq_prep(struct mmc_host *host, struct mmc_request *mrq)
+{
+        unsigned int i, sz = 0;
+        struct scatterlist *sg;
+
+        if (mrq->cmd) {
+                mrq->cmd->error = 0;
+                mrq->cmd->mrq = mrq;
+                mrq->cmd->data = mrq->data;
+        }
+        if (mrq->sbc) {
+                mrq->sbc->error = 0;
+                mrq->sbc->mrq = mrq;
+        }
+        if (mrq->data) {
+                if (mrq->data->blksz > host->max_blk_size || 
+                    mrq->data->blocks > host->max_blk_count ||
+                    mrq->data->blocks * mrq->data->blksz > host->max_req_size)
+                        return -EINVAL; 
+    
+                for_each_sg(mrq->data->sg, sg, mrq->data->sg_len, i)
+                        sz += sg->length;
+                if (sz != mrq->data->blocks * mrq->data->blksz)
+                        return -EINVAL;
+
+                mrq->data->error = 0;
+                mrq->data->mrq = mrq;
+                if (mrq->stop) {
+                        mrq->data->stop = mrq->stop;
+                        mrq->stop->error = 0;
+                        mrq->stop->mrq = mrq;
+                }
+        }
+
+        return 0;
+}
+
+int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
+{
+        int err;
+
+        init_completion(&mrq->cmd_completion);
+
+        mmc_retune_hold(host);
+
+        if (mmc_card_removed(host->card))
+                return -ENOMEDIUM;
+
+        mmc_mrq_pr_debug(host, mrq, false);
+
+        WARN_ON(!host->claimed);
+
+        err = mmc_mrq_prep(host, mrq);
+        if (err)
+                return err;
+/*
+        led_trigger_event(host->led, LED_FULL);
+        __mmc_start_request(host, mrq);
+*/
+        return 0;
+}
+EXPORT_SYMBOL(mmc_start_request);
+
+static void mmc_wait_done(struct mmc_request *mrq)
+{
+        complete(&mrq->completion);
+}
+
+static int __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
+{
+        int err;
+
+        mmc_wait_ongoing_tfr_cmd(host);
+
+        init_completion(&mrq->completion);
+        mrq->done = mmc_wait_done;
+
+        err = mmc_start_request(host, mrq);
+/*        if (err) {
+                mrq->cmd->error = err;
+                mmc_complete_cmd(mrq);
+                complete(&mrq->completion);
+        }
+ */
+        return err;
+}
+
+/**
+ *      mmc_wait_for_req - start a request and wait for completion
+ *      @host: MMC host to start command
+ *      @mrq: MMC request to start
+ *
+ *      Start a new MMC custom command request for a host, and wait
+ *      for the command to complete. In the case of 'cap_cmd_during_tfr'
+ *      requests, the transfer is ongoing and the caller can issue further
+ *      commands that do not use the data lines, and then wait by calling
+ *      mmc_wait_for_req_done(). 
+ *      Does not attempt to parse the response.
+ */
+void mmc_wait_for_req(struct mmc_host *host, struct mmc_request *mrq)
+{
+        __mmc_start_req(host, mrq);
+
+  // shijonn      if (!mrq->cap_cmd_during_tfr)
+  // shijonn             mmc_wait_for_req_done(host, mrq);
+}
+EXPORT_SYMBOL(mmc_wait_for_req);
+
+/**
+ *      mmc_wait_for_cmd - start a command and wait for completion
+ *      @host: MMC host to start command
+ *      @cmd: MMC command to start
+ *      @retries: maximum number of retries
+ *
+ *      Start a new MMC command for a host, and wait for the command
+ *      to complete.  Return any error that occurred while the command
+ *      was executing.  Do not attempt to parse the response.
+ */
+int mmc_wait_for_cmd(struct mmc_host *host, struct mmc_command *cmd, int retries)
+{
+        struct mmc_request mrq = {};
+
+        WARN_ON(!host->claimed);
+
+        memset(cmd->resp, 0, sizeof(cmd->resp));
+        cmd->retries = retries;
+
+        mrq.cmd = cmd;
+        cmd->data = NULL;
+
+        mmc_wait_for_req(host, &mrq);
+
+        return cmd->error;
+}
+
+EXPORT_SYMBOL(mmc_wait_for_cmd);
+
 /*
  * Apply power to the MMC stack.  This is a two-stage process.
  * First, we enable power to the card without the clock running.
@@ -262,36 +456,6 @@ static void mmc_hw_reset_for_init(struct mmc_host *host)
         host->ops->hw_reset(host);
 }
 
-static inline void mmc_wait_ongoing_tfr_cmd(struct mmc_host *host)
-{
- //       struct mmc_request *ongoing_mrq = READ_ONCE(host->ongoing_mrq);
-
-        /*
-         * If there is an ongoing transfer, wait for the command line to become
-         * available.
-         */
- //       if (ongoing_mrq && !completion_done(&ongoing_mrq->cmd_completion))
- //               wait_for_completion(&ongoing_mrq->cmd_completion);
-}
-
-static int __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
-{
-        int err;
-/*
-        mmc_wait_ongoing_tfr_cmd(host);
-
-        init_completion(&mrq->completion);
-        mrq->done = mmc_wait_done;
-
-        err = mmc_start_request(host, mrq);
-        if (err) {
-                mrq->cmd->error = err;
-                mmc_complete_cmd(mrq);
-                complete(&mrq->completion);
-        }
- */   
-        return err; 
-}
 
 
 static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
@@ -318,7 +482,7 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
         if (!(host->caps2 & MMC_CAP2_NO_SDIO))
                 sdio_reset(host);
 
-//        mmc_go_idle(host);
+        mmc_go_idle(host);
 
 //        if (!(host->caps2 & MMC_CAP2_NO_SD))
 //                mmc_send_if_cond(host, host->ocr_avail);
