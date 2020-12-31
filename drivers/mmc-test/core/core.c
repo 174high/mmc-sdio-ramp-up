@@ -44,6 +44,8 @@
 
 #include "pwrseq.h"
 
+#include "sdio_ops.h"
+
 /* The max erase timeout, used when host->max_busy_timeout isn't specified */
 #define MMC_ERASE_TIMEOUT_MS    (60 * 1000) /* 60 s */
 
@@ -179,20 +181,133 @@ void mmc_power_off(struct mmc_host *host)
         mmc_delay(1);
 } 
 
+int mmc_set_signal_voltage(struct mmc_host *host, int signal_voltage)
+{
+        int err = 0;
+        int old_signal_voltage = host->ios.signal_voltage;
+
+        host->ios.signal_voltage = signal_voltage;
+        if (host->ops->start_signal_voltage_switch)
+                err = host->ops->start_signal_voltage_switch(host, &host->ios);
+
+        if (err)
+                host->ios.signal_voltage = old_signal_voltage;
+
+        return err;
+
+}
+  
+void mmc_set_initial_signal_voltage(struct mmc_host *host)
+{
+        /* Try to set signal voltage to 3.3V but fall back to 1.8v or 1.2v */
+        if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_330))
+                dev_dbg(mmc_dev(host), "Initial signal voltage of 3.3v\n");
+        else if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_180))
+                dev_dbg(mmc_dev(host), "Initial signal voltage of 1.8v\n");
+        else if (!mmc_set_signal_voltage(host, MMC_SIGNAL_VOLTAGE_120))
+                dev_dbg(mmc_dev(host), "Initial signal voltage of 1.2v\n");
+}
+
+/*
+ * Apply power to the MMC stack.  This is a two-stage process.
+ * First, we enable power to the card without the clock running.
+ * We then wait a bit for the power to stabilise.  Finally,
+ * enable the bus drivers and clock to the card.
+ *
+ * We must _NOT_ enable the clock prior to power stablising.
+ *
+ * If a host does all the power sequencing itself, ignore the
+ * initial MMC_POWER_UP stage.
+ */
+void mmc_power_up(struct mmc_host *host, u32 ocr)
+{
+        if (host->ios.power_mode == MMC_POWER_ON)
+                return;
+
+        mmc_pwrseq_pre_power_on(host);
+        
+        host->ios.vdd = fls(ocr) - 1;
+        host->ios.power_mode = MMC_POWER_UP;
+        /* Set initial state and call mmc_set_ios */
+        mmc_set_initial_state(host);
+        
+        mmc_set_initial_signal_voltage(host);
+        
+        /*
+         * This delay should be sufficient to allow the power supply
+         * to reach the minimum voltage.
+         */
+        mmc_delay(host->ios.power_delay_ms);
+
+     //   mmc_pwrseq_post_power_on(host);
+
+     //   host->ios.clock = host->f_init;
+
+    //    host->ios.power_mode = MMC_POWER_ON;
+    //    mmc_set_ios(host);
+
+        /*
+         * This delay must be at least 74 clock sizes, or 1 ms, or the
+         * time required to reach a stable voltage.
+         */
+  //      mmc_delay(host->ios.power_delay_ms);
+}
+
+static void mmc_hw_reset_for_init(struct mmc_host *host)
+{               
+        mmc_pwrseq_reset(host);
+
+        if (!(host->caps & MMC_CAP_HW_RESET) || !host->ops->hw_reset)
+                return;
+        host->ops->hw_reset(host);
+}
+
+static inline void mmc_wait_ongoing_tfr_cmd(struct mmc_host *host)
+{
+ //       struct mmc_request *ongoing_mrq = READ_ONCE(host->ongoing_mrq);
+
+        /*
+         * If there is an ongoing transfer, wait for the command line to become
+         * available.
+         */
+ //       if (ongoing_mrq && !completion_done(&ongoing_mrq->cmd_completion))
+ //               wait_for_completion(&ongoing_mrq->cmd_completion);
+}
+
+static int __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
+{
+        int err;
+/*
+        mmc_wait_ongoing_tfr_cmd(host);
+
+        init_completion(&mrq->completion);
+        mrq->done = mmc_wait_done;
+
+        err = mmc_start_request(host, mrq);
+        if (err) {
+                mrq->cmd->error = err;
+                mmc_complete_cmd(mrq);
+                complete(&mrq->completion);
+        }
+ */   
+        return err; 
+}
+
+
 static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
 {
-/*        host->f_init = freq; 
+        host->f_init = freq; 
 
         pr_debug("%s: %s: trying to init card at %u Hz\n",
                 mmc_hostname(host), __func__, host->f_init);
 
         mmc_power_up(host, host->ocr_avail);
- */
+ 
         /*
          * Some eMMCs (with VCCQ always on) may not be reset after power up, so
          * do a hardware reset if possible.
          */
-  //      mmc_hw_reset_for_init(host);
+        mmc_hw_reset_for_init(host);
 
         /*
          * sdio_reset sends CMD52 to reset card.  Since we do not know
@@ -200,14 +315,14 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
          * should be ignored by SD/eMMC cards.
          * Skip it if we already know that we do not support SDIO commands
          */
-   /*     if (!(host->caps2 & MMC_CAP2_NO_SDIO))
+        if (!(host->caps2 & MMC_CAP2_NO_SDIO))
                 sdio_reset(host);
 
-        mmc_go_idle(host);
+//        mmc_go_idle(host);
 
-        if (!(host->caps2 & MMC_CAP2_NO_SD))
-                mmc_send_if_cond(host, host->ocr_avail);
-*/
+//        if (!(host->caps2 & MMC_CAP2_NO_SD))
+//                mmc_send_if_cond(host, host->ocr_avail);
+
         /* Order's important: probe SDIO, then SD, then MMC */
   /*      if (!(host->caps2 & MMC_CAP2_NO_SDIO))
                if (!mmc_attach_sdio(host))
