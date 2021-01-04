@@ -515,3 +515,32 @@ int mmc_send_cid(struct mmc_host *host, u32 *cid)
 
         return mmc_send_cxd_native(host, 0, cid, MMC_ALL_SEND_CID);
 }
+
+static int _mmc_select_card(struct mmc_host *host, struct mmc_card *card)
+{
+        struct mmc_command cmd = {};
+
+        cmd.opcode = MMC_SELECT_CARD;
+
+        if (card) {
+                cmd.arg = card->rca << 16;
+                cmd.flags = MMC_RSP_R1 | MMC_CMD_AC;
+        } else {
+                cmd.arg = 0;
+                cmd.flags = MMC_RSP_NONE | MMC_CMD_AC;
+        }
+
+        return mmc_wait_for_cmd(host, &cmd, MMC_CMD_RETRIES);
+}
+
+int mmc_select_card(struct mmc_card *card)
+{
+
+        return _mmc_select_card(card->host, card);
+}
+
+int mmc_deselect_cards(struct mmc_host *host)
+{
+        return _mmc_select_card(host, NULL);
+}
+

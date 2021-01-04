@@ -28,13 +28,13 @@
 //#include "card.h"
 #include "host.h"
 #include "bus.h"
-//#include "quirks.h"
+#include "quirks.h"
 #include "sd.h"
 //#include "sdio_bus.h"
 #include "mmc_ops.h"
-//#include "sd_ops.h"
+#include "sd_ops.h"
 #include "sdio_ops.h"
-//#include "sdio_cis.h"
+#include "sdio_cis.h"
 
 static const struct mmc_bus_ops mmc_sdio_ops = {
   /*      .remove = mmc_sdio_remove,
@@ -48,6 +48,115 @@ static const struct mmc_bus_ops mmc_sdio_ops = {
         .hw_reset = mmc_sdio_hw_reset,
         .sw_reset = mmc_sdio_sw_reset, */
 };
+
+static void mmc_sdio_resend_if_cond(struct mmc_host *host,
+                                    struct mmc_card *card)
+{
+        sdio_reset(host); 
+        mmc_go_idle(host);
+        mmc_send_if_cond(host, host->ocr_avail);
+        mmc_remove_card(card);
+}
+
+static int sdio_read_cccr(struct mmc_card *card, u32 ocr)
+{
+	int ret;
+	int cccr_vsn;
+	int uhs = ocr & R4_18V_PRESENT;
+	unsigned char data;
+	unsigned char speed;
+
+	ret = mmc_io_rw_direct(card, 0, 0, SDIO_CCCR_CCCR, 0, &data);
+	if (ret)
+		goto out;
+
+	cccr_vsn = data & 0x0f;
+
+	if (cccr_vsn > SDIO_CCCR_REV_3_00) {
+		pr_err("%s: unrecognised CCCR structure version %d\n",
+			mmc_hostname(card->host), cccr_vsn);
+		return -EINVAL;
+	}
+
+	card->cccr.sdio_vsn = (data & 0xf0) >> 4;
+
+	ret = mmc_io_rw_direct(card, 0, 0, SDIO_CCCR_CAPS, 0, &data);
+	if (ret)
+		goto out;
+
+	if (data & SDIO_CCCR_CAP_SMB)
+		card->cccr.multi_block = 1;
+	if (data & SDIO_CCCR_CAP_LSC)
+		card->cccr.low_speed = 1;
+	if (data & SDIO_CCCR_CAP_4BLS)
+		card->cccr.wide_bus = 1;
+
+	if (cccr_vsn >= SDIO_CCCR_REV_1_10) {
+		ret = mmc_io_rw_direct(card, 0, 0, SDIO_CCCR_POWER, 0, &data);
+		if (ret)
+			goto out;
+
+		if (data & SDIO_POWER_SMPC)
+			card->cccr.high_power = 1;
+	}
+
+	if (cccr_vsn >= SDIO_CCCR_REV_1_20) {
+		ret = mmc_io_rw_direct(card, 0, 0, SDIO_CCCR_SPEED, 0, &speed);
+		if (ret)
+			goto out;
+
+		card->scr.sda_spec3 = 0;
+		card->sw_caps.sd3_bus_mode = 0;
+		card->sw_caps.sd3_drv_type = 0;
+		if (cccr_vsn >= SDIO_CCCR_REV_3_00 && uhs) {
+			card->scr.sda_spec3 = 1;
+			ret = mmc_io_rw_direct(card, 0, 0,
+				SDIO_CCCR_UHS, 0, &data);
+			if (ret)
+				goto out;
+
+			if (mmc_host_uhs(card->host)) {
+				if (data & SDIO_UHS_DDR50)
+					card->sw_caps.sd3_bus_mode
+						|= SD_MODE_UHS_DDR50;
+
+				if (data & SDIO_UHS_SDR50)
+					card->sw_caps.sd3_bus_mode
+						|= SD_MODE_UHS_SDR50;
+
+				if (data & SDIO_UHS_SDR104)
+					card->sw_caps.sd3_bus_mode
+						|= SD_MODE_UHS_SDR104;
+			}
+
+			ret = mmc_io_rw_direct(card, 0, 0,
+				SDIO_CCCR_DRIVE_STRENGTH, 0, &data);
+			if (ret)
+				goto out;
+
+			if (data & SDIO_DRIVE_SDTA)
+				card->sw_caps.sd3_drv_type |= SD_DRIVER_TYPE_A;
+			if (data & SDIO_DRIVE_SDTC)
+				card->sw_caps.sd3_drv_type |= SD_DRIVER_TYPE_C;
+			if (data & SDIO_DRIVE_SDTD)
+				card->sw_caps.sd3_drv_type |= SD_DRIVER_TYPE_D;
+		}
+
+		/* if no uhs mode ensure we check for high speed */
+		if (!card->sw_caps.sd3_bus_mode) {
+			if (speed & SDIO_SPEED_SHS) {
+				card->cccr.high_speed = 1;
+				card->sw_caps.hs_max_dtr = 50000000;
+			} else {
+				card->cccr.high_speed = 0;
+				card->sw_caps.hs_max_dtr = 25000000;
+			}
+		}
+	}
+
+out:
+	return ret;
+}
 
 /*
  * Handle the detection and initialisation of a card.
@@ -104,26 +213,26 @@ try_again:
 
         if ((rocr & R4_MEMORY_PRESENT) &&
             mmc_sd_get_cid(host, ocr & rocr, card->raw_cid, NULL) == 0) {
-       /*         card->type = MMC_TYPE_SD_COMBO;
+                card->type = MMC_TYPE_SD_COMBO;
 
                 if (oldcard && (oldcard->type != MMC_TYPE_SD_COMBO ||
                     memcmp(card->raw_cid, oldcard->raw_cid, sizeof(card->raw_cid)) != 0)) {
                         mmc_remove_card(card);
                         return -ENOENT;
-                } */
+                } 
         } else {
-          /*      card->type = MMC_TYPE_SDIO;
+                card->type = MMC_TYPE_SDIO;
 
                 if (oldcard && oldcard->type != MMC_TYPE_SDIO) {
                         mmc_remove_card(card);
                         return -ENOENT;
-                } */
+                } 
         } 
         /*
          * Call the optional HC's init_card function to handle quirks.
          */
-    //    if (host->ops->init_card)
-    //            host->ops->init_card(host, card);
+        if (host->ops->init_card)
+                host->ops->init_card(host, card);
 
         /*
          * If the host and card support UHS-I mode request the card
@@ -136,7 +245,7 @@ try_again:
          * try to init uhs card. sdio_read_cccr will take over this task
          * to make sure which speed mode should work.
          */
-   /*     if (!powered_resume && (rocr & ocr & R4_18V_PRESENT)) {
+        if (!powered_resume && (rocr & ocr & R4_18V_PRESENT)) {
                 err = mmc_set_uhs_voltage(host, ocr_card);
                 if (err == -EAGAIN) {
                         mmc_sdio_resend_if_cond(host, card);
@@ -146,78 +255,78 @@ try_again:
                         ocr &= ~R4_18V_PRESENT;
                 }
         }
-  */
+  
         /*
          * For native busses:  set card RCA and quit open drain mode.
          */
-    //    if (!powered_resume && !mmc_host_is_spi(host)) {
-    //            err = mmc_send_relative_addr(host, &card->rca);
-    //            if (err)
-    //                    goto remove;
+        if (!powered_resume && !mmc_host_is_spi(host)) {
+                err = mmc_send_relative_addr(host, &card->rca);
+                if (err)
+                        goto remove;
 
                 /*
                  * Update oldcard with the new RCA received from the SDIO
                  * device -- we're doing this so that it's updated in the
                  * "card" struct when oldcard overwrites that later.
                  */
-    //            if (oldcard)
-    //                    oldcard->rca = card->rca;
-    //    }
+                if (oldcard)
+                        oldcard->rca = card->rca;
+        }
         /*
          * Read CSD, before selecting the card
          */
-     /*   if (!oldcard && card->type == MMC_TYPE_SD_COMBO) {
+        if (!oldcard && card->type == MMC_TYPE_SD_COMBO) {
                 err = mmc_sd_get_csd(host, card);
                 if (err)
                         return err;
 
                 mmc_decode_cid(card);
         }
- */
+ 
         /*
          * Select card, as all following commands rely on that.
          */
-    /*    if (!powered_resume && !mmc_host_is_spi(host)) {
+        if (!powered_resume && !mmc_host_is_spi(host)) {
                 err = mmc_select_card(card);
                 if (err)
                         goto remove;
         }
 
         if (card->quirks & MMC_QUIRK_NONSTD_SDIO) {
-      */          /*
+                /*
                  * This is non-standard SDIO device, meaning it doesn't
                  * have any CIA (Common I/O area) registers present.
                  * It's host's responsibility to fill cccr and cis
                  * structures in init_card().
                  */
-  /*              mmc_set_clock(host, card->cis.max_dtr);
+                mmc_set_clock(host, card->cis.max_dtr);
 
                 if (card->cccr.high_speed) {
                         mmc_set_timing(card->host, MMC_TIMING_SD_HS);
                 }
 
                 goto finish;
-        } */
+        } 
         /*
          * Read the common registers. Note that we should try to
          * validate whether UHS would work or not.
          */
-    /*    err = sdio_read_cccr(card, ocr);
+        err = sdio_read_cccr(card, ocr);
         if (err) {
                 mmc_sdio_resend_if_cond(host, card);
-                if (ocr & R4_18V_PRESENT) {  */
+                if (ocr & R4_18V_PRESENT) { 
                         /* Retry init sequence, but without R4_18V_PRESENT. */
-     /*                   retries = 0;
+                        retries = 0;
                         goto try_again;
                 } else {
                         goto remove;
                 }
         }
-*/
+
         /*
          * Read the common CIS tuples.
          */
-     /*   err = sdio_read_common_cis(card);
+        err = sdio_read_common_cis(card);
         if (err)
                 goto remove;
 
@@ -232,20 +341,20 @@ try_again:
         }
         card->ocr = ocr_card;
         mmc_fixup_device(card, sdio_fixup_methods);
-
+ 
         if (card->type == MMC_TYPE_SD_COMBO) {
                 err = mmc_sd_setup_card(host, card, oldcard != NULL);
-       */         /* handle as SDIO-only card if memory init failed */
-     /*           if (err) {
+              /* handle as SDIO-only card if memory init failed */
+               if (err) {
                         mmc_go_idle(host);
                         if (mmc_host_is_spi(host))
-  */                              /* should not fail, as it worked previously */
-   /*                             mmc_spi_set_crc(host, use_spi_crc);
+                                /* should not fail, as it worked previously */
+                                mmc_spi_set_crc(host, use_spi_crc);
                         card->type = MMC_TYPE_SDIO;
                 } else
                         card->dev.type = &sd_type;
         }
-*/
+
         /*
          * If needed, disconnect card detection pull-up resistor.
          */
@@ -288,7 +397,7 @@ try_again:
                         mmc_hostname(host));
                 err = -EINVAL;
                 goto remove;
-        }
+        } */
 finish:
         if (!oldcard)
                 host->card = card;
@@ -297,7 +406,7 @@ finish:
 remove:
         if (!oldcard)
                 mmc_remove_card(card);
-*/
+
 err:
         return err;
 }
