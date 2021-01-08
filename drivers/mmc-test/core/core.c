@@ -71,6 +71,42 @@ static int mmc_schedule_delayed_work(struct delayed_work *work,
         return queue_delayed_work(system_freezable_wq, work, delay);
 }
 
+#ifdef CONFIG_FAIL_MMC_REQUEST
+
+/*
+ * Internal function. Inject random data errors.
+ * If mmc_data is NULL no errors are injected.
+ */
+static void mmc_should_fail_request(struct mmc_host *host,
+                                    struct mmc_request *mrq)
+{
+        struct mmc_command *cmd = mrq->cmd;
+        struct mmc_data *data = mrq->data;
+        static const int data_errors[] = {
+                -ETIMEDOUT,
+                -EILSEQ,
+                -EIO,
+        };
+
+        if (!data)
+                return;
+
+        if ((cmd && cmd->error) || data->error ||
+            !should_fail(&host->fail_mmc_request, data->blksz * data->blocks))
+                return;
+
+        data->error = data_errors[prandom_u32() % ARRAY_SIZE(data_errors)];
+        data->bytes_xfered = (prandom_u32() % (data->bytes_xfered >> 9)) << 9;
+}
+
+#else /* CONFIG_FAIL_MMC_REQUEST */
+
+static inline void mmc_should_fail_request(struct mmc_host *host,
+                                           struct mmc_request *mrq)
+{
+}
+
+#endif /* CONFIG_FAIL_MMC_REQUEST */
 
 /*
  * mmc_get_reserved_index() - get the index reserved for this host
@@ -330,6 +366,99 @@ static int mmc_mrq_prep(struct mmc_host *host, struct mmc_request *mrq)
         return 0;
 }
 
+static inline void mmc_complete_cmd(struct mmc_request *mrq)
+{
+        if (mrq->cap_cmd_during_tfr && !completion_done(&mrq->cmd_completion))
+                complete_all(&mrq->cmd_completion);
+}
+
+
+/**
+ *	mmc_request_done - finish processing an MMC request
+ *	@host: MMC host which completed request
+ *	@mrq: MMC request which request
+ *
+ *	MMC drivers should call this function when they have completed
+ *	their processing of a request.
+ */
+void mmc_request_done(struct mmc_host *host, struct mmc_request *mrq)
+{
+	struct mmc_command *cmd = mrq->cmd;
+	int err = cmd->error;
+
+	/* Flag re-tuning needed on CRC errors */
+	if ((cmd->opcode != MMC_SEND_TUNING_BLOCK &&
+	    cmd->opcode != MMC_SEND_TUNING_BLOCK_HS200) &&
+	    (err == -EILSEQ || (mrq->sbc && mrq->sbc->error == -EILSEQ) ||
+	    (mrq->data && mrq->data->error == -EILSEQ) ||
+	    (mrq->stop && mrq->stop->error == -EILSEQ)))
+		mmc_retune_needed(host);
+
+	if (err && cmd->retries && mmc_host_is_spi(host)) {
+		if (cmd->resp[0] & R1_SPI_ILLEGAL_COMMAND)
+			cmd->retries = 0;
+	}
+
+	if (host->ongoing_mrq == mrq)
+		host->ongoing_mrq = NULL;
+
+	mmc_complete_cmd(mrq);
+
+	trace_mmc_request_done(host, mrq);
+
+	/*
+	 * We list various conditions for the command to be considered
+	 * properly done:
+	 *
+	 * - There was no error, OK fine then
+	 * - We are not doing some kind of retry
+	 * - The card was removed (...so just complete everything no matter
+	 *   if there are errors or retries)
+	 */
+	if (!err || !cmd->retries || mmc_card_removed(host->card)) {
+		mmc_should_fail_request(host, mrq);
+
+		if (!host->ongoing_mrq)
+			led_trigger_event(host->led, LED_OFF);
+
+		if (mrq->sbc) {
+			pr_debug("%s: req done <CMD%u>: %d: %08x %08x %08x %08x\n",
+				mmc_hostname(host), mrq->sbc->opcode,
+				mrq->sbc->error,
+				mrq->sbc->resp[0], mrq->sbc->resp[1],
+				mrq->sbc->resp[2], mrq->sbc->resp[3]);
+		}
+
+		pr_debug("%s: req done (CMD%u): %d: %08x %08x %08x %08x\n",
+			mmc_hostname(host), cmd->opcode, err,
+			cmd->resp[0], cmd->resp[1],
+			cmd->resp[2], cmd->resp[3]);
+
+		if (mrq->data) {
+			pr_debug("%s:     %d bytes transferred: %d\n",
+				mmc_hostname(host),
+				mrq->data->bytes_xfered, mrq->data->error);
+		}
+
+		if (mrq->stop) {
+			pr_debug("%s:     (CMD%u): %d: %08x %08x %08x %08x\n",
+				mmc_hostname(host), mrq->stop->opcode,
+				mrq->stop->error,
+				mrq->stop->resp[0], mrq->stop->resp[1],
+				mrq->stop->resp[2], mrq->stop->resp[3]);
+		}
+	}
+	/*
+	 * Request starter must handle retries - see
+	 * mmc_wait_for_req_done().
+	 */
+	if (mrq->done)
+		mrq->done(mrq);
+}
+
+EXPORT_SYMBOL(mmc_request_done);
+
+
 static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 {
         int err;
@@ -338,7 +467,7 @@ static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
         err = mmc_retune(host);
         if (err) {
                 mrq->cmd->error = err; 
-// shijonn                mmc_request_done(host, mrq);
+                mmc_request_done(host, mrq);
                 return;
         }
 
@@ -347,10 +476,10 @@ static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
          * sdio devices won't work properly.
          * And bypass I/O abort, reset and bus suspend operations.
          */
- //       if (sdio_is_io_busy(mrq->cmd->opcode, mrq->cmd->arg) &&
- //           host->ops->card_busy) {
-//                int tries = 500; /* Wait aprox 500ms at maximum */
-/*    
+        if (sdio_is_io_busy(mrq->cmd->opcode, mrq->cmd->arg) &&
+            host->ops->card_busy) {
+                int tries = 500; /* Wait aprox 500ms at maximum */
+   
                 while (host->ops->card_busy(host) && --tries)
                         mmc_delay(1);
 
@@ -363,11 +492,11 @@ static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
 
         if (mrq->cap_cmd_during_tfr) {
                 host->ongoing_mrq = mrq;
-  */              /*
+                 /*
                  * Retry path could come through here without having waiting on
                  * cmd_completion, so ensure it is reinitialised.
                  */
- /*               reinit_completion(&mrq->cmd_completion);
+                reinit_completion(&mrq->cmd_completion);
         }
 
         trace_mmc_request_start(host, mrq);
@@ -375,7 +504,7 @@ static void __mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
         if (host->cqe_on)
                 host->cqe_ops->cqe_off(host);
 
-        host->ops->request(host, mrq); */
+        host->ops->request(host, mrq); 
 }
 
 int mmc_start_request(struct mmc_host *host, struct mmc_request *mrq)
@@ -409,11 +538,6 @@ static void mmc_wait_done(struct mmc_request *mrq)
         complete(&mrq->completion);
 }
 
-static inline void mmc_complete_cmd(struct mmc_request *mrq)
-{       
-        if (mrq->cap_cmd_during_tfr && !completion_done(&mrq->cmd_completion))
-                complete_all(&mrq->cmd_completion);
-} 
 
 static int __mmc_start_req(struct mmc_host *host, struct mmc_request *mrq)
 {

@@ -29,6 +29,8 @@
 #include "core.h"
 #include "host.h"
 #include "slot-gpio.h"
+#include "pwrseq.h"
+#include "sdio_ops.h"
 
 #define cls_dev_to_mmc_host(d)  container_of(d, struct mmc_host, class_dev)
 
@@ -90,6 +92,12 @@ void mmc_retune_release(struct mmc_host *host)
 }
 EXPORT_SYMBOL(mmc_retune_release);
 
+static void mmc_retune_timer(struct timer_list *t)
+{
+        struct mmc_host *host = from_timer(host, t, retune_timer);
+
+        mmc_retune_needed(host);
+}
 
 /**
  *      mmc_alloc_host - initialise the per-host structure.
@@ -144,8 +152,8 @@ struct mmc_host *mmc_alloc_host(int extra, struct device *dev)
         spin_lock_init(&host->lock);
         init_waitqueue_head(&host->wq); 
         INIT_DELAYED_WORK(&host->detect, mmc_rescan);
-    // shijonn    INIT_DELAYED_WORK(&host->sdio_irq_work, sdio_irq_work);
-    // shijonn    timer_setup(&host->retune_timer, mmc_retune_timer, 0);
+        INIT_DELAYED_WORK(&host->sdio_irq_work, sdio_irq_work);
+        timer_setup(&host->retune_timer, mmc_retune_timer, 0);
 
         /*
          * By default, hosts do not support SGIO or large requests.
@@ -190,15 +198,29 @@ int mmc_retune(struct mmc_host *host)
 
                 return_to_hs400 = true;
         }
-/*
+
         err = mmc_execute_tuning(host->card);
         if (err)
                 goto out;
 
         if (return_to_hs400)
                 err = mmc_hs200_to_hs400(host->card);
-*/out:
+out:
         host->doing_retune = 0;
 
         return err;
 }
+
+/**
+ *      mmc_free_host - free the host structure
+ *      @host: mmc host
+ *
+ *      Free the host once all references to it have been dropped.
+ */
+void mmc_free_host(struct mmc_host *host)
+{
+        mmc_pwrseq_free(host);
+        put_device(&host->class_dev);
+}
+
+EXPORT_SYMBOL(mmc_free_host);

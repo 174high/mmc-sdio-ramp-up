@@ -424,3 +424,10 @@ struct sdhci_host *sdhci_alloc_host(struct device *dev,
 }
 
 EXPORT_SYMBOL_GPL(sdhci_alloc_host);
+
+void sdhci_free_host(struct sdhci_host *host)
+{
+        mmc_free_host(host->mmc);
+}
+
+EXPORT_SYMBOL_GPL(sdhci_free_host);

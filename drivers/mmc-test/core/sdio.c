@@ -25,7 +25,7 @@
 #include <linux/init.h>
 
 #include "core.h"
-//#include "card.h"
+#include "card.h"
 #include "host.h"
 #include "bus.h"
 #include "quirks.h"
