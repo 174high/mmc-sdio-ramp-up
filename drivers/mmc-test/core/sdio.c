@@ -30,11 +30,84 @@
 #include "bus.h"
 #include "quirks.h"
 #include "sd.h"
-//#include "sdio_bus.h"
+#include "sdio_bus.h"
 #include "mmc_ops.h"
 #include "sd_ops.h"
 #include "sdio_ops.h"
 #include "sdio_cis.h"
+
+static int sdio_read_fbr(struct sdio_func *func)
+{
+        int ret;
+        unsigned char data;
+
+        if (mmc_card_nonstd_func_interface(func->card)) {
+                func->class = SDIO_CLASS_NONE;
+                return 0;
+        }
+
+        ret = mmc_io_rw_direct(func->card, 0, 0,
+                SDIO_FBR_BASE(func->num) + SDIO_FBR_STD_IF, 0, &data);
+        if (ret)
+                goto out;
+
+        data &= 0x0f;
+
+        if (data == 0x0f) {
+                ret = mmc_io_rw_direct(func->card, 0, 0,
+                        SDIO_FBR_BASE(func->num) + SDIO_FBR_STD_IF_EXT, 0, &data);
+                if (ret)
+                        goto out;
+        }
+
+        func->class = data;
+
+out:
+        return ret;
+}
+
+
+static int sdio_init_func(struct mmc_card *card, unsigned int fn)
+{
+        int ret;
+        struct sdio_func *func;
+
+        if (WARN_ON(fn > SDIO_MAX_FUNCS))
+                return -EINVAL;
+
+        func = sdio_alloc_func(card);
+        if (IS_ERR(func))
+                return PTR_ERR(func);
+
+        func->num = fn;
+
+        if (!(card->quirks & MMC_QUIRK_NONSTD_SDIO)) {
+                ret = sdio_read_fbr(func);
+                if (ret)
+                        goto fail;
+
+                ret = sdio_read_func_cis(func);
+                if (ret)
+                        goto fail;
+        } else {
+                func->vendor = func->card->cis.vendor;
+                func->device = func->card->cis.device;
+                func->max_blksize = func->card->cis.blksize;
+        }
+
+        card->sdio_func[fn - 1] = func;
+
+        return 0;
+
+fail:
+        /*
+         * It is okay to remove the function here even though we hold
+         * the host lock as we haven't registered the device yet.
+         */
+        sdio_remove_func(func);
+        return ret;
+}
+
 
 static const struct mmc_bus_ops mmc_sdio_ops = {
   /*      .remove = mmc_sdio_remove,
@@ -391,13 +464,85 @@ static int mmc_sdio_init_uhs_card(struct mmc_card *card)
          * SPI mode doesn't define CMD19 and tuning is only valid for SDR50 and
          * SDR104 mode SD-cards. Note that tuning is mandatory for SDR104.
          */
- //       if (!mmc_host_is_spi(card->host) &&
- // shijonn           ((card->host->ios.timing == MMC_TIMING_UHS_SDR50) ||
- //             (card->host->ios.timing == MMC_TIMING_UHS_SDR104)))
- //               err = mmc_execute_tuning(card);
+        if (!mmc_host_is_spi(card->host) &&
+           ((card->host->ios.timing == MMC_TIMING_UHS_SDR50) ||
+              (card->host->ios.timing == MMC_TIMING_UHS_SDR104)))
+                err = mmc_execute_tuning(card);
 out:
         return err;
 }
+
+/*
+ * Test if the card supports high-speed mode and, if so, switch to it.
+ */
+static int mmc_sdio_switch_hs(struct mmc_card *card, int enable)
+{
+        int ret;
+        u8 speed;
+
+        if (!(card->host->caps & MMC_CAP_SD_HIGHSPEED))
+                return 0;
+
+        if (!card->cccr.high_speed)
+                return 0;
+
+        ret = mmc_io_rw_direct(card, 0, 0, SDIO_CCCR_SPEED, 0, &speed);
+        if (ret)
+                return ret;
+
+        if (enable)
+                speed |= SDIO_SPEED_EHS;
+        else
+                speed &= ~SDIO_SPEED_EHS;
+
+        ret = mmc_io_rw_direct(card, 1, 0, SDIO_CCCR_SPEED, speed, NULL);
+        if (ret)
+                return ret;
+
+        return 1;
+}
+
+
+/*
+ * Enable SDIO/combo card's high-speed mode. Return 0/1 if [not]supported.
+ */
+static int sdio_enable_hs(struct mmc_card *card)
+{
+        int ret;
+
+        ret = mmc_sdio_switch_hs(card, true);
+        if (ret <= 0 || card->type == MMC_TYPE_SDIO)
+                return ret;
+
+        ret = mmc_sd_switch_hs(card);
+        if (ret <= 0)
+                mmc_sdio_switch_hs(card, false);
+
+        return ret;
+}
+
+static unsigned mmc_sdio_get_max_clock(struct mmc_card *card)
+{
+        unsigned max_dtr;
+
+        if (mmc_card_hs(card)) {
+                /*
+                 * The SDIO specification doesn't mention how
+                 * the CIS transfer speed register relates to
+                 * high-speed, but it seems that 50 MHz is
+                 * mandatory.
+                 */
+                max_dtr = 50000000;
+        } else {
+                max_dtr = card->cis.max_dtr;
+        }
+
+        if (card->type == MMC_TYPE_SD_COMBO)
+                max_dtr = min(max_dtr, mmc_sd_get_max_clock(card));
+
+        return max_dtr;
+}
+
 
 /*
  * Handle the detection and initialisation of a card.
@@ -613,32 +758,32 @@ try_again:
                  /*
                  * Switch to high-speed (if supported).
                  */
-    /*            err = sdio_enable_hs(card);
-                if (err > 0)
+                err = sdio_enable_hs(card);
+               if (err > 0)
                         mmc_set_timing(card->host, MMC_TIMING_SD_HS);
                 else if (err)
                         goto remove;
-  */
+  
                 /*
                  * Change to the card's maximum speed.
                  */
-  //              mmc_set_clock(host, mmc_sdio_get_max_clock(card));
+                mmc_set_clock(host, mmc_sdio_get_max_clock(card));
 
                 /*
                  * Switch to wider bus (if supported).
                  */
-/*                err = sdio_enable_4bit_bus(card);
-         if (err)
-                        goto remove;i */
+                err = sdio_enable_4bit_bus(card);
+         	if (err)
+                        goto remove;
         }
-/*
+
         if (host->caps2 & MMC_CAP2_AVOID_3_3V &&
             host->ios.signal_voltage == MMC_SIGNAL_VOLTAGE_330) {
                 pr_err("%s: Host failed to negotiate down from 3.3V\n",
                         mmc_hostname(host));
                 err = -EINVAL;
                 goto remove;
-        } */
+        } 
 finish:
         if (!oldcard)
                 host->card = card;
@@ -651,6 +796,27 @@ remove:
 err:
         return err;
 }
+
+/*
+ * Host is being removed. Free up the current card.
+ */
+static void mmc_sdio_remove(struct mmc_host *host)
+{
+        int i;
+
+        for (i = 0;i < host->card->sdio_funcs;i++) {
+                if (host->card->sdio_func[i]) {
+                        sdio_remove_func(host->card->sdio_func[i]);
+                        host->card->sdio_func[i] = NULL;
+                }
+        }
+
+        mmc_remove_card(host->card);
+        /* clear rescan_entered in case force remove */
+        host->rescan_entered = 0;
+        host->card = NULL;
+}
+
 
 /*
  * Starting point for SDIO card init.
@@ -693,60 +859,60 @@ int mmc_attach_sdio(struct mmc_host *host)
         /*
          * Enable runtime PM only if supported by host+card+board
          */
- //       if (host->caps & MMC_CAP_POWER_OFF_CARD) {
+        if (host->caps & MMC_CAP_POWER_OFF_CARD) {
                 /*
                  * Do not allow runtime suspend until after SDIO function
                  * devices are added.
                  */
-  //              pm_runtime_get_noresume(&card->dev);
+                pm_runtime_get_noresume(&card->dev);
 
                 /*
                  * Let runtime PM core know our card is active
                  */
-  //              err = pm_runtime_set_active(&card->dev);
-  //              if (err)
-  //                      goto remove;
+                err = pm_runtime_set_active(&card->dev);
+                if (err)
+                        goto remove;
 
                 /*
                  * Enable runtime PM for this card
                  */
-  //              pm_runtime_enable(&card->dev);
-  //      }
+                pm_runtime_enable(&card->dev);
+         }
 
         /*
          * The number of functions on the card is encoded inside
          * the ocr.
          */
-   //     funcs = (ocr & 0x70000000) >> 28;
-  //      card->sdio_funcs = 0;
+        funcs = (ocr & 0x70000000) >> 28;
+        card->sdio_funcs = 0;
 
         /*
          * Initialize (but don't add) all present functions.
          */
-   //     for (i = 0; i < funcs; i++, card->sdio_funcs++) {
-  //              err = sdio_init_func(host->card, i + 1);
-   //             if (err)
-   //                     goto remove;
+        for (i = 0; i < funcs; i++, card->sdio_funcs++) {
+                 err = sdio_init_func(host->card, i + 1);
+                 if (err)
+                        goto remove;
 
                 /*
                  * Enable Runtime PM for this func (if supported)
                  */
-     //           if (host->caps & MMC_CAP_POWER_OFF_CARD)
-      //                  pm_runtime_enable(&card->sdio_func[i]->dev);
-     //   }
+                if (host->caps & MMC_CAP_POWER_OFF_CARD)
+                        pm_runtime_enable(&card->sdio_func[i]->dev);
+        }
 
         /*
          * First add the card to the driver model...
          */
-    //    mmc_release_host(host);
-  //      err = mmc_add_card(host->card);
-   //     if (err)
-   //             goto remove_added;
+        mmc_release_host(host);
+        err = mmc_add_card(host->card);
+        if (err)
+                goto remove_added;
 
         /*
          * ...then the SDIO functions.
          */
-   /*      for (i = 0;i < funcs;i++) {
+        for (i = 0;i < funcs;i++) {
                 err = sdio_add_func(host->card->sdio_func[i]);
                 if (err)
                         goto remove_added;
@@ -761,16 +927,16 @@ int mmc_attach_sdio(struct mmc_host *host)
 remove:
         mmc_release_host(host);
 remove_added:
-     */   /*
+        /*
          * The devices are being deleted so it is not necessary to disable
          * runtime PM. Similarly we also don't pm_runtime_put() the SDIO card
          * because it needs to be active to remove any function devices that
          * were probed, and after that it gets deleted.
          */
-     /*   mmc_sdio_remove(host);
-        mmc_claim_host(host); */
+        mmc_sdio_remove(host);
+        mmc_claim_host(host); 
 err:
- //       mmc_detach_bus(host);
+        mmc_detach_bus(host);
 
         pr_err("%s: error %d whilst initialising SDIO card\n",
                 mmc_hostname(host), err);

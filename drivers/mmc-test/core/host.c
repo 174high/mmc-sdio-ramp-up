@@ -46,6 +46,16 @@ static struct class mmc_host_class = {
         .dev_release    = mmc_host_classdev_release,
 };
 
+void mmc_retune_enable(struct mmc_host *host)
+{
+        host->can_retune = 1;
+        if (host->retune_period)
+                mod_timer(&host->retune_timer,
+                          jiffies + host->retune_period * HZ);
+}
+
+
+
 void mmc_retune_unpause(struct mmc_host *host)
 {
         if (host->retune_paused) {

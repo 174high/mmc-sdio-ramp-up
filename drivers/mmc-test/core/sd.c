@@ -514,7 +514,61 @@ int mmc_sd_setup_card(struct mmc_host *host, struct mmc_card *card,
 	return 0;
 }
 
+/*
+ * Test if the card supports high-speed mode and, if so, switch to it.
+ */
+int mmc_sd_switch_hs(struct mmc_card *card)
+{
+        int err;
+        u8 *status;
 
+        if (card->scr.sda_vsn < SCR_SPEC_VER_1)
+                return 0;
+
+        if (!(card->csd.cmdclass & CCC_SWITCH))
+                return 0;
+
+        if (!(card->host->caps & MMC_CAP_SD_HIGHSPEED))
+                return 0;
+
+        if (card->sw_caps.hs_max_dtr == 0)
+                return 0;
+
+        status = kmalloc(64, GFP_KERNEL);
+        if (!status)
+                return -ENOMEM;
+
+        err = mmc_sd_switch(card, 1, 0, 1, status);
+        if (err)
+                goto out;
+
+        if ((status[16] & 0xF) != 1) {
+                pr_warn("%s: Problem switching card into high-speed mode!\n",
+                        mmc_hostname(card->host));
+                err = 0;
+        } else {
+                err = 1;
+        }
+
+out:
+        kfree(status);
+
+        return err;
+}
+
+unsigned mmc_sd_get_max_clock(struct mmc_card *card)
+{
+        unsigned max_dtr = (unsigned int)-1;
+
+        if (mmc_card_hs(card)) {
+                if (max_dtr > card->sw_caps.hs_max_dtr)
+                        max_dtr = card->sw_caps.hs_max_dtr;
+        } else if (max_dtr > card->csd.max_dtr) {
+                max_dtr = card->csd.max_dtr;
+        }
+
+        return max_dtr;
+}
 
 
 
