@@ -594,3 +594,32 @@ int mmc_stop_bkops(struct mmc_card *card)
         return err;
 }
 
+int mmc_get_ext_csd(struct mmc_card *card, u8 **new_ext_csd)
+{
+        int err;
+        u8 *ext_csd;
+
+        if (!card || !new_ext_csd)
+                return -EINVAL;
+
+        if (!mmc_can_ext_csd(card))
+                return -EOPNOTSUPP;
+
+        /*
+         * As the ext_csd is so large and mostly unused, we don't store the
+         * raw block in mmc_card.
+         */
+        ext_csd = kzalloc(512, GFP_KERNEL);
+        if (!ext_csd)
+                return -ENOMEM;
+
+        err = mmc_send_cxd_data(card, card->host, MMC_SEND_EXT_CSD, ext_csd,
+                                512);
+        if (err)
+                kfree(ext_csd);
+        else
+                *new_ext_csd = ext_csd;
+
+        return err;
+}
+EXPORT_SYMBOL_GPL(mmc_get_ext_csd);
