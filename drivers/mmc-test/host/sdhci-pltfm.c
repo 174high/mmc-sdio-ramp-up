@@ -100,7 +100,7 @@ void sdhci_pltfm_free(struct platform_device *pdev)
 {
         struct sdhci_host *host = platform_get_drvdata(pdev);
 
-//       	sdhci_free_host(host);
+// shijonn      	sdhci_free_host(host);
 }
 EXPORT_SYMBOL_GPL(sdhci_pltfm_free);
 
