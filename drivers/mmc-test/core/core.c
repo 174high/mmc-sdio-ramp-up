@@ -810,7 +810,7 @@ void mmc_rescan(struct work_struct *work)
         /* if there still is a card present, stop here */
         if (host->bus_ops != NULL) {
                 mmc_bus_put(host);
-//                goto out;
+                goto out;
         }
 
         /*
@@ -824,7 +824,7 @@ void mmc_rescan(struct work_struct *work)
                         host->ops->get_cd(host) == 0) {
                 mmc_power_off(host);
                 mmc_release_host(host);
- //               goto out;
+                goto out;
         }
 
         for (i = 0; i < ARRAY_SIZE(freqs); i++) {
@@ -833,11 +833,11 @@ void mmc_rescan(struct work_struct *work)
                 if (freqs[i] <= host->f_min)
                         break;
         }
-//        mmc_release_host(host);
+        mmc_release_host(host);
 
-// out:
- //       if (host->caps & MMC_CAP_NEEDS_POLL)
- //               mmc_schedule_delayed_work(&host->detect, HZ); 
+out:
+        if (host->caps & MMC_CAP_NEEDS_POLL)
+                mmc_schedule_delayed_work(&host->detect, HZ); 
 
 }
 
