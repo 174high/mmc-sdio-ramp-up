@@ -1376,3 +1376,12 @@ int _mmc_detect_card_removed(struct mmc_host *host)
         return ret;
 }
 
+/*
+ * Change the bus mode (open drain/push-pull) of a host.
+ */
+void mmc_set_bus_mode(struct mmc_host *host, unsigned int mode)
+{
+        host->ios.bus_mode = mode;
+        mmc_set_ios(host);
+}
+
