@@ -19,10 +19,32 @@
 #include <linux/mmc/mmc.h>
 
 #include "core.h"
+#include "card.h"
 #include "host.h"
 #include "mmc_ops.h"
 
 #define MMC_OPS_TIMEOUT_MS      (10 * 60 * 1000) /* 10 minute timeout */
+
+/*
+ * Write the value specified in the device tree or board code into the optional
+ * 16 bit Driver Stage Register. This can be used to tune raise/fall times and
+ * drive strength of the DAT and CMD outputs. The actual meaning of a given
+ * value is hardware dependant.
+ * The presence of the DSR register can be determined from the CSD register,
+ * bit 76.
+ */     
+int mmc_set_dsr(struct mmc_host *host)
+{
+        struct mmc_command cmd = {};
+
+        cmd.opcode = MMC_SET_DSR;
+
+        cmd.arg = (host->dsr << 16) | 0xffff;
+        cmd.flags = MMC_RSP_NONE | MMC_CMD_AC;
+
+        return mmc_wait_for_cmd(host, &cmd, MMC_CMD_RETRIES);
+}
+
 
 int mmc_spi_read_ocr(struct mmc_host *host, int highcap, u32 *ocrp)
 {
@@ -542,5 +564,33 @@ int mmc_select_card(struct mmc_card *card)
 int mmc_deselect_cards(struct mmc_host *host)
 {
         return _mmc_select_card(host, NULL);
+}
+
+/**
+ *      mmc_stop_bkops - stop ongoing BKOPS
+ *      @card: MMC card to check BKOPS
+ *
+ *      Send HPI command to stop ongoing background operations to
+ *      allow rapid servicing of foreground operations, e.g. read/
+ *      writes. Wait until the card comes out of the programming state
+ *      to avoid errors in servicing read/write requests.
+ */
+int mmc_stop_bkops(struct mmc_card *card)
+{
+        int err = 0;
+
+        err = mmc_interrupt_hpi(card);
+
+        /*
+         * If err is EINVAL, we can't issue an HPI.
+         * It should complete the BKOPS.
+         */
+        if (!err || (err == -EINVAL)) {
+                mmc_card_clr_doing_bkops(card);
+                mmc_retune_release(card->host);
+                err = 0;
+        }
+
+        return err;
 }
 

@@ -59,6 +59,19 @@ static int __mmc_max_reserved_idx = -1;
 bool use_spi_crc = 1;
 module_param(use_spi_crc, bool, 0);
 
+static int mmc_schedule_delayed_work(struct delayed_work *work,
+                                     unsigned long delay)
+{
+        /*
+         * We use the system_freezable_wq, because of two reasons.
+         * First, it allows several works (not the same work item) to be
+         * executed simultaneously. Second, the queue becomes frozen when
+         * userspace becomes frozen during system PM.
+         */
+        return queue_delayed_work(system_freezable_wq, work, delay);
+}
+
+
 /*
  * mmc_get_reserved_index() - get the index reserved for this host
  * Return: The index reserved for this host or negative error value
@@ -706,7 +719,7 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
                 {
                         return 0;
                 }
-/*
+
 
 
         if (!(host->caps2 & MMC_CAP2_NO_SD))
@@ -718,7 +731,7 @@ static int mmc_rescan_try_freq(struct mmc_host *host, unsigned freq)
                         return 0;
 
         mmc_power_off(host);
-    */    return -EIO;
+        return -EIO;
 }
 
 int mmc_select_drive_strength(struct mmc_card *card, unsigned int max_dtr,
@@ -950,81 +963,6 @@ void mmc_set_clock(struct mmc_host *host, unsigned int hz)
         mmc_set_ios(host);
 }
 
-int mmc_hs400_to_hs200(struct mmc_card *card)
-{
-        struct mmc_host *host = card->host;
-        unsigned int max_dtr;
-        int err;
-        u8 val;
-
-        /* Reduce frequency to HS */
-        max_dtr = card->ext_csd.hs_max_dtr;
-        mmc_set_clock(host, max_dtr);
-
-        /* Switch HS400 to HS DDR */
-        val = EXT_CSD_TIMING_HS;
-        err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_HS_TIMING,
-                           val, card->ext_csd.generic_cmd6_time, 0,
-                           true, false, true);
-    /*    if (err)
-                goto out_err;
-
-        mmc_set_timing(host, MMC_TIMING_MMC_DDR52);
-
-        err = mmc_switch_status(card);
-        if (err)
-                goto out_err;
-   */
-        /* Switch HS DDR to HS */
-    /*    err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_BUS_WIDTH,
-                           EXT_CSD_BUS_WIDTH_8, card->ext_csd.generic_cmd6_time,
-                           0, true, false, true);
-        if (err)
-                goto out_err;
-
-        mmc_set_timing(host, MMC_TIMING_MMC_HS);
-
-        if (host->ops->hs400_downgrade)
-               host->ops->hs400_downgrade(host);
-
-        err = mmc_switch_status(card);
-        if (err)
-                goto out_err;
-    */
-        /* Switch HS to HS200 */
-    /*    val = EXT_CSD_TIMING_HS200 |
-              card->drive_strength << EXT_CSD_DRV_STR_SHIFT;
-        err = __mmc_switch(card, EXT_CSD_CMD_SET_NORMAL, EXT_CSD_HS_TIMING,
-                           val, card->ext_csd.generic_cmd6_time, 0,
-                           true, false, true);
-        if (err)
-                goto out_err;
-
-        mmc_set_timing(host, MMC_TIMING_MMC_HS200);
-   */
-        /*
-         * For HS200, CRC errors are not a reliable way to know the switch
-         * failed. If there really is a problem, we would expect tuning will
-         * fail and the result ends up the same.
-         */
-     /*   err = __mmc_switch_status(card, false);
-        if (err)
-                goto out_err;
-
-        mmc_set_bus_speed(card);
-    */
-        /* Prepare tuning for HS400 mode. */
-     //   if (host->ops->prepare_hs400_tuning)
-     //           host->ops->prepare_hs400_tuning(host, &host->ios);
-
-        return 0;
-
-out_err:
-        pr_err("%s: %s failed, error %d\n", mmc_hostname(card->host),
-               __func__, err);
- 
-        return err;
-}
 
 /*
  * Select timing parameters for host.
@@ -1377,4 +1315,64 @@ void mmc_detach_bus(struct mmc_host *host)
         mmc_bus_put(host);
 }
 
+static void _mmc_detect_change(struct mmc_host *host, unsigned long delay,
+                                bool cd_irq)
+{
+        /*
+         * If the device is configured as wakeup, we prevent a new sleep for
+         * 5 s to give provision for user space to consume the event.
+         */
+        if (cd_irq && !(host->caps & MMC_CAP_NEEDS_POLL) &&
+                device_can_wakeup(mmc_dev(host)))
+                pm_wakeup_event(mmc_dev(host), 5000);
+
+        host->detect_change = 1;
+        mmc_schedule_delayed_work(&host->detect, delay);
+}
+
+/**
+ *      mmc_detect_change - process change of state on a MMC socket
+ *      @host: host which changed state.
+ *      @delay: optional delay to wait before detection (jiffies)
+ *
+ *      MMC drivers should call this when they detect a card has been
+ *      inserted or removed. The MMC layer will confirm that any
+ *      present card is still functional, and initialize any newly
+ *      inserted.
+ */
+void mmc_detect_change(struct mmc_host *host, unsigned long delay)
+{
+        _mmc_detect_change(host, delay, true);
+}
+EXPORT_SYMBOL(mmc_detect_change);
+
+
+int _mmc_detect_card_removed(struct mmc_host *host)
+{
+        int ret;
+
+        if (!host->card || mmc_card_removed(host->card))
+                return 1;
+
+        ret = host->bus_ops->alive(host);
+
+        /*
+         * Card detect status and alive check may be out of sync if card is
+         * removed slowly, when card detect switch changes while card/slot
+         * pads are still contacted in hardware (refer to "SD Card Mechanical
+         * Addendum, Appendix C: Card Detection Switch"). So reschedule a
+         * detect work 200ms later for this case.
+         */
+        if (!ret && host->ops->get_cd && !host->ops->get_cd(host)) {
+                mmc_detect_change(host, msecs_to_jiffies(200));
+                pr_debug("%s: card removed too slowly\n", mmc_hostname(host));
+        }
+
+        if (ret) { 
+                mmc_card_set_removed(host->card);
+                pr_debug("%s: card remove detected\n", mmc_hostname(host));
+        }
+
+        return ret;
+}
 
