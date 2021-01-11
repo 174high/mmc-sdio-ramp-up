@@ -7,4 +7,5 @@ obj-m					+= sdhci.o
 obj-m           			+= sdhci-pltfm.o
 obj-m					+= sdhci-esdhc-imx-test.o
 
+obj-y                                   += cqhci.o
 

@@ -100,6 +100,31 @@ static void mmc_retune_timer(struct timer_list *t)
 }
 
 /**
+ *      mmc_remove_host - remove host hardware
+ *      @host: mmc host
+ *
+ *      Unregister and remove all cards associated with this host,
+ *      and power down the MMC bus. No new requests will be issued
+ *      after this function has returned.
+ */
+void mmc_remove_host(struct mmc_host *host)
+{
+        if (!(host->pm_caps & MMC_PM_IGNORE_PM_NOTIFY))
+                mmc_unregister_pm_notifier(host);
+        mmc_stop_host(host);
+
+#ifdef CONFIG_DEBUG_FS
+        mmc_remove_host_debugfs(host);
+#endif
+
+        device_del(&host->class_dev);
+
+        led_trigger_unregister_simple(host->led);
+}
+
+EXPORT_SYMBOL(mmc_remove_host);
+
+/**
  *      mmc_alloc_host - initialise the per-host structure.
  *      @extra: sizeof private data structure
  *      @dev: pointer to host device model structure

@@ -19,7 +19,7 @@
 #include <linux/pm_runtime.h>
 #include "sdhci-pltfm.h"
 #include "sdhci-esdhc.h"
-//#include "cqhci.h"
+#include "cqhci.h"
 
 #define ESDHC_SYS_CTRL_DTOCV_MASK       0x0f
 #define ESDHC_CTRL_D3CD                 0x08
@@ -302,13 +302,6 @@ static inline int esdhc_is_usdhc(struct pltfm_imx_data *data)
 }
 
 
-/*
-static const struct dev_pm_ops sdhci_esdhc_pmops = {
-        SET_SYSTEM_SLEEP_PM_OPS(sdhci_esdhc_suspend, sdhci_esdhc_resume)
-        SET_RUNTIME_PM_OPS(sdhci_esdhc_runtime_suspend,
-                                sdhci_esdhc_runtime_resume, NULL)
-};
-*/
 
 static const struct sdhci_pltfm_data sdhci_esdhc_imx_pdata = {
 
@@ -429,16 +422,287 @@ free_sdhci:
 
 static int sdhci_esdhc_imx_remove(struct platform_device *pdev)
 {
+        struct sdhci_host *host = platform_get_drvdata(pdev);
+        struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+        struct pltfm_imx_data *imx_data = sdhci_pltfm_priv(pltfm_host);
+        int dead = (readl(host->ioaddr + SDHCI_INT_STATUS) == 0xffffffff);
 
+        if (imx_data->socdata->flags & ESDHC_FLAG_PMQOS)
+                pm_qos_remove_request(&imx_data->pm_qos_req);
 
-	return 0 ;
+        pm_runtime_get_sync(&pdev->dev);
+        pm_runtime_disable(&pdev->dev);
+        pm_runtime_put_noidle(&pdev->dev);
+
+        sdhci_remove_host(host, dead);
+
+        clk_disable_unprepare(imx_data->clk_per);
+        clk_disable_unprepare(imx_data->clk_ipg);
+        clk_disable_unprepare(imx_data->clk_ahb);
+        if (imx_data->socdata->flags & ESDHC_FLAG_BUSFREQ)
+                release_bus_freq(BUS_FREQ_HIGH);
+
+        sdhci_pltfm_free(pdev);
+
+        return 0;
 }
+
+
+static void sdhci_esdhc_imx_hwinit(struct sdhci_host *host)
+{
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct pltfm_imx_data *imx_data = sdhci_pltfm_priv(pltfm_host);
+	int tmp;
+
+	if (esdhc_is_usdhc(imx_data)) {
+		/*
+		 * The imx6q ROM code will change the default watermark
+		 * level setting to something insane.  Change it back here.
+		 */
+		writel(ESDHC_WTMK_DEFAULT_VAL, host->ioaddr + ESDHC_WTMK_LVL);
+
+		/*
+		 * ROM code will change the bit burst_length_enable setting
+		 * to zero if this usdhc is chosen to boot system. Change
+		 * it back here, otherwise it will impact the performance a
+		 * lot. This bit is used to enable/disable the burst length
+		 * for the external AHB2AXI bridge. It's useful especially
+		 * for INCR transfer because without burst length indicator,
+		 * the AHB2AXI bridge does not know the burst length in
+		 * advance. And without burst length indicator, AHB INCR
+		 * transfer can only be converted to singles on the AXI side.
+		 */
+		writel(readl(host->ioaddr + SDHCI_HOST_CONTROL)
+			| ESDHC_BURST_LEN_EN_INCR,
+			host->ioaddr + SDHCI_HOST_CONTROL);
+
+		/* disable DLL_CTRL delay line settings */
+		writel(0x0, host->ioaddr + ESDHC_DLL_CTRL);
+
+		/*
+		 * For the case of command with busy, if set the bit
+		 * ESDHC_VEND_SPEC2_EN_BUSY_IRQ, USDHC will generate a
+		 * transfer complete interrupt when busy is deasserted.
+		 * When CQHCI use DCMD to send a CMD need R1b respons,
+		 * CQHCI require to set ESDHC_VEND_SPEC2_EN_BUSY_IRQ,
+		 * otherwise DCMD will always meet timeout waiting for
+		 * hardware interrupt issue.
+		 */
+		if (imx_data->socdata->flags & ESDHC_FLAG_CQHCI) {
+			tmp = readl(host->ioaddr + ESDHC_VEND_SPEC2);
+			tmp |= ESDHC_VEND_SPEC2_EN_BUSY_IRQ;
+			writel(tmp, host->ioaddr + ESDHC_VEND_SPEC2);
+
+			host->quirks &= ~SDHCI_QUIRK_NO_BUSY_IRQ;
+		}
+
+		if (imx_data->socdata->flags & ESDHC_FLAG_STD_TUNING) {
+			tmp = readl(host->ioaddr + ESDHC_TUNING_CTRL);
+			tmp |= ESDHC_STD_TUNING_EN |
+				ESDHC_TUNING_START_TAP_DEFAULT;
+			if (imx_data->boarddata.tuning_start_tap) {
+				tmp &= ~ESDHC_TUNING_START_TAP_MASK;
+				tmp |= imx_data->boarddata.tuning_start_tap;
+			}
+
+			if (imx_data->boarddata.tuning_step) {
+				tmp &= ~ESDHC_TUNING_STEP_MASK;
+				tmp |= imx_data->boarddata.tuning_step
+					<< ESDHC_TUNING_STEP_SHIFT;
+			}
+			writel(tmp, host->ioaddr + ESDHC_TUNING_CTRL);
+		} else if (imx_data->socdata->flags & ESDHC_FLAG_MAN_TUNING) {
+			/*
+			 * ESDHC_STD_TUNING_EN may be configed in bootloader
+			 * or ROM code, so clear this bit here to make sure
+			 * the manual tuning can work.
+			 */
+			tmp = readl(host->ioaddr + ESDHC_TUNING_CTRL);
+			tmp &= ~ESDHC_STD_TUNING_EN;
+			writel(tmp, host->ioaddr + ESDHC_TUNING_CTRL);
+		}
+	}
+}
+
+
+#ifdef CONFIG_PM_SLEEP
+static int sdhci_esdhc_suspend(struct device *dev)
+{
+	struct sdhci_host *host = dev_get_drvdata(dev);
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct pltfm_imx_data *imx_data = sdhci_pltfm_priv(pltfm_host);
+	int ret;
+
+	pm_runtime_get_sync(dev);
+
+	if (host->mmc->caps2 & MMC_CAP2_CQE) {
+		ret = cqhci_suspend(host->mmc);
+		if (ret)
+			return ret;
+	}
+
+	if ((imx_data->socdata->flags & ESDHC_FLAG_STATE_LOST_IN_LPMODE) &&
+	    (host->tuning_mode != SDHCI_TUNING_MODE_1)) {
+		mmc_retune_timer_stop(host->mmc);
+		mmc_retune_needed(host->mmc);
+	}
+
+	if (host->tuning_mode != SDHCI_TUNING_MODE_3)
+		mmc_retune_needed(host->mmc);
+
+	ret = sdhci_suspend_host(host);
+
+	pinctrl_pm_select_sleep_state(dev);
+
+	if (!sdhci_sdio_irq_enabled(host)) {
+		clk_disable_unprepare(imx_data->clk_per);
+		clk_disable_unprepare(imx_data->clk_ipg);
+	}
+	clk_disable_unprepare(imx_data->clk_ahb);
+
+	pm_runtime_disable(dev);
+	pm_runtime_set_suspended(dev);
+
+	return ret;
+}
+
+static int sdhci_esdhc_resume(struct device *dev)
+{
+	struct sdhci_host *host = dev_get_drvdata(dev);
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct pltfm_imx_data *imx_data = sdhci_pltfm_priv(pltfm_host);
+	int ret;
+
+	if (!sdhci_sdio_irq_enabled(host)) {
+		clk_prepare_enable(imx_data->clk_per);
+		clk_prepare_enable(imx_data->clk_ipg);
+	}
+	clk_prepare_enable(imx_data->clk_ahb);
+
+	pm_runtime_set_active(dev);
+	pm_runtime_enable(dev);
+
+	pinctrl_pm_select_default_state(dev);
+
+	/* re-initialize hw state in case it's lost in low power mode */
+// shijonn	sdhci_esdhc_imx_hwinit(host);
+
+	ret = sdhci_resume_host(host);
+	if (ret)
+		return ret;
+
+	if (host->mmc->caps2 & MMC_CAP2_CQE)
+		ret = cqhci_resume(host->mmc);
+
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_put_autosuspend(dev);
+
+	return ret;
+}
+#endif
+
+#ifdef CONFIG_PM
+static int sdhci_esdhc_runtime_suspend(struct device *dev)
+{
+	struct sdhci_host *host = dev_get_drvdata(dev);
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct pltfm_imx_data *imx_data = sdhci_pltfm_priv(pltfm_host);
+	int ret;
+
+	if (host->mmc->caps2 & MMC_CAP2_CQE) {
+		ret = cqhci_suspend(host->mmc);
+		if (ret)
+			return ret;
+	}
+
+	ret = sdhci_runtime_suspend_host(host);
+	if (ret)
+		return ret;
+
+	if (host->tuning_mode != SDHCI_TUNING_MODE_3)
+		mmc_retune_needed(host->mmc);
+
+	if (!sdhci_sdio_irq_enabled(host)) {
+		imx_data->actual_clock = host->mmc->actual_clock;
+	//shijon	esdhc_pltfm_set_clock(host, 0);
+		clk_disable_unprepare(imx_data->clk_per);
+		clk_disable_unprepare(imx_data->clk_ipg);
+	}
+	clk_disable_unprepare(imx_data->clk_ahb);
+
+	if (imx_data->socdata->flags & ESDHC_FLAG_BUSFREQ)
+		release_bus_freq(BUS_FREQ_HIGH);
+
+	if (imx_data->socdata->flags & ESDHC_FLAG_PMQOS)
+		pm_qos_remove_request(&imx_data->pm_qos_req);
+
+	return ret;
+}
+
+static int sdhci_esdhc_runtime_resume(struct device *dev)
+{
+	struct sdhci_host *host = dev_get_drvdata(dev);
+	struct sdhci_pltfm_host *pltfm_host = sdhci_priv(host);
+	struct pltfm_imx_data *imx_data = sdhci_pltfm_priv(pltfm_host);
+	int err;
+
+	err = clk_prepare_enable(imx_data->clk_ahb);
+	if (err)
+		return err;
+
+	if (imx_data->socdata->flags & ESDHC_FLAG_BUSFREQ)
+		request_bus_freq(BUS_FREQ_HIGH);
+
+	if (imx_data->socdata->flags & ESDHC_FLAG_PMQOS)
+		pm_qos_add_request(&imx_data->pm_qos_req,
+			PM_QOS_CPU_DMA_LATENCY, 0);
+
+	if (imx_data->socdata->flags & ESDHC_FLAG_CLK_RATE_LOST_IN_PM_RUNTIME)
+		clk_set_rate(imx_data->clk_per, pltfm_host->clock);
+
+	if (!sdhci_sdio_irq_enabled(host)) {
+		err = clk_prepare_enable(imx_data->clk_per);
+		if (err)
+			goto disable_ahb_clk;
+		err = clk_prepare_enable(imx_data->clk_ipg);
+		if (err)
+			goto disable_per_clk;
+	// shijon	esdhc_pltfm_set_clock(host, imx_data->actual_clock);
+	}
+
+	err = sdhci_runtime_resume_host(host);
+	if (err)
+		goto disable_ipg_clk;
+
+	if (host->mmc->caps2 & MMC_CAP2_CQE)
+		err = cqhci_resume(host->mmc);
+
+	return err;
+
+disable_ipg_clk:
+	if (!sdhci_sdio_irq_enabled(host))
+		clk_disable_unprepare(imx_data->clk_ipg);
+disable_per_clk:
+	if (!sdhci_sdio_irq_enabled(host))
+		clk_disable_unprepare(imx_data->clk_per);
+disable_ahb_clk:
+	clk_disable_unprepare(imx_data->clk_ahb);
+	return err;
+}
+#endif
+
+static const struct dev_pm_ops sdhci_esdhc_pmops = {
+//        SET_SYSTEM_SLEEP_PM_OPS(sdhci_esdhc_suspend, sdhci_esdhc_resume)
+//        SET_RUNTIME_PM_OPS(sdhci_esdhc_runtime_suspend,
+//                                sdhci_esdhc_runtime_resume, NULL)
+};      
+
 
 static struct platform_driver sdhci_esdhc_imx_driver = {
         .driver         = {
                 .name   = "sdhci-esdhc-imx-test",
                 .of_match_table = imx_esdhc_dt_ids,
-//                .pm     = &sdhci_esdhc_pmops,
+                .pm     = &sdhci_esdhc_pmops,
         },
          .id_table       = imx_esdhc_devtype,
          .probe          = sdhci_esdhc_imx_probe,

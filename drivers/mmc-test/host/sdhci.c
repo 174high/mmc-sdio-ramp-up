@@ -431,3 +431,284 @@ void sdhci_free_host(struct sdhci_host *host)
 }
 
 EXPORT_SYMBOL_GPL(sdhci_free_host);
+
+static bool sdhci_needs_reset(struct sdhci_host *host, struct mmc_request *mrq)
+{
+        return (!(host->flags & SDHCI_DEVICE_DEAD) &&
+                ((mrq->cmd && mrq->cmd->error) ||
+                 (mrq->sbc && mrq->sbc->error) ||
+                 (mrq->data && ((mrq->data->error && !mrq->data->stop) ||
+                                (mrq->data->stop && mrq->data->stop->error))) ||
+                 (host->quirks & SDHCI_QUIRK_RESET_AFTER_REQUEST)));
+}
+
+static void __sdhci_finish_mrq(struct sdhci_host *host, struct mmc_request *mrq)
+{
+        int i;
+
+        for (i = 0; i < SDHCI_MAX_MRQS; i++) {
+                if (host->mrqs_done[i] == mrq) {
+                        WARN_ON(1);
+                        return;
+                }
+        }
+
+        for (i = 0; i < SDHCI_MAX_MRQS; i++) {
+                if (!host->mrqs_done[i]) {
+                        host->mrqs_done[i] = mrq;
+                        break;
+                }
+        }
+
+        WARN_ON(i >= SDHCI_MAX_MRQS);
+
+        tasklet_schedule(&host->finish_tasklet);
+}
+
+
+static void sdhci_finish_mrq(struct sdhci_host *host, struct mmc_request *mrq)
+{
+        if (host->cmd && host->cmd->mrq == mrq)
+                host->cmd = NULL;
+
+        if (host->data_cmd && host->data_cmd->mrq == mrq)
+                host->data_cmd = NULL;
+
+        if (host->data && host->data->mrq == mrq)
+                host->data = NULL;
+
+        if (sdhci_needs_reset(host, mrq))
+                host->pending_reset = true;
+
+        __sdhci_finish_mrq(host, mrq);
+}
+
+
+
+static inline bool sdhci_has_requests(struct sdhci_host *host)
+{
+        return host->cmd || host->data_cmd;
+}
+
+static void sdhci_error_out_mrqs(struct sdhci_host *host, int err)
+{
+        if (host->data_cmd) {
+                host->data_cmd->error = err;
+                sdhci_finish_mrq(host, host->data_cmd->mrq);
+        }
+
+        if (host->cmd) {
+                host->cmd->error = err;
+                sdhci_finish_mrq(host, host->cmd->mrq);
+        }
+}
+
+static void sdhci_set_card_detection(struct sdhci_host *host, bool enable)
+{
+        u32 present;    
+        int gpio_cd = mmc_gpio_get_cd(host->mmc);
+ 
+        if ((host->quirks & SDHCI_QUIRK_BROKEN_CARD_DETECTION) ||
+            !mmc_card_is_removable(host->mmc) || (gpio_cd >= 0))
+                return; 
+ 
+        if (enable) {
+                present = sdhci_readl(host, SDHCI_PRESENT_STATE) &
+                                      SDHCI_CARD_PRESENT;
+
+                host->ier |= present ? SDHCI_INT_CARD_REMOVE :
+                                       SDHCI_INT_CARD_INSERT;
+        } else {
+                host->ier &= ~(SDHCI_INT_CARD_REMOVE | SDHCI_INT_CARD_INSERT);
+        }
+
+        sdhci_writel(host, host->ier, SDHCI_INT_ENABLE); 
+        sdhci_writel(host, host->ier, SDHCI_SIGNAL_ENABLE);
+}
+                
+static void sdhci_enable_card_detection(struct sdhci_host *host)
+{        
+        sdhci_set_card_detection(host, true);
+}
+
+static void sdhci_disable_card_detection(struct sdhci_host *host)
+{
+        sdhci_set_card_detection(host, false);
+}
+
+static void __sdhci_led_activate(struct sdhci_host *host)
+{
+        u8 ctrl;
+
+        ctrl = sdhci_readb(host, SDHCI_HOST_CONTROL);
+        ctrl |= SDHCI_CTRL_LED;
+        sdhci_writeb(host, ctrl, SDHCI_HOST_CONTROL);
+}
+
+static void __sdhci_led_deactivate(struct sdhci_host *host)
+{
+        u8 ctrl;
+
+        ctrl = sdhci_readb(host, SDHCI_HOST_CONTROL);
+        ctrl &= ~SDHCI_CTRL_LED;
+        sdhci_writeb(host, ctrl, SDHCI_HOST_CONTROL);
+}
+
+
+
+#if IS_REACHABLE(CONFIG_LEDS_CLASS)
+static void sdhci_led_control(struct led_classdev *led,
+                              enum led_brightness brightness)
+{
+        struct sdhci_host *host = container_of(led, struct sdhci_host, led);
+        unsigned long flags;
+
+        spin_lock_irqsave(&host->lock, flags);
+
+        if (host->runtime_suspended)
+                goto out;
+
+        if (brightness == LED_OFF)
+                __sdhci_led_deactivate(host);
+        else
+                __sdhci_led_activate(host);
+out:
+        spin_unlock_irqrestore(&host->lock, flags);
+}
+
+static int sdhci_led_register(struct sdhci_host *host)
+{
+        struct mmc_host *mmc = host->mmc;
+
+        snprintf(host->led_name, sizeof(host->led_name),
+                 "%s::", mmc_hostname(mmc));
+
+        host->led.name = host->led_name;
+        host->led.brightness = LED_OFF;
+        host->led.default_trigger = mmc_hostname(mmc);
+        host->led.brightness_set = sdhci_led_control;
+        
+        return led_classdev_register(mmc_dev(mmc), &host->led);
+}
+
+static void sdhci_led_unregister(struct sdhci_host *host)
+{
+        led_classdev_unregister(&host->led);
+}
+
+static inline void sdhci_led_activate(struct sdhci_host *host)
+{
+}
+
+static inline void sdhci_led_deactivate(struct sdhci_host *host)
+{
+}
+
+#else
+
+static inline int sdhci_led_register(struct sdhci_host *host)
+{
+        return 0;
+}
+
+static inline void sdhci_led_unregister(struct sdhci_host *host)
+{
+}
+
+static inline void sdhci_led_activate(struct sdhci_host *host)
+{
+        __sdhci_led_activate(host);
+}
+
+static inline void sdhci_led_deactivate(struct sdhci_host *host)
+{                               
+        __sdhci_led_deactivate(host);
+}
+         
+#endif   
+
+static void sdhci_do_reset(struct sdhci_host *host, u8 mask)
+{
+        if (host->quirks & SDHCI_QUIRK_NO_CARD_NO_RESET) {
+                struct mmc_host *mmc = host->mmc;
+
+                if (!mmc->ops->get_cd(mmc))
+                        return;
+        }
+
+        host->ops->reset(host, mask);
+
+        if (mask & SDHCI_RESET_ALL) {
+                if (host->flags & (SDHCI_USE_SDMA | SDHCI_USE_ADMA)) {
+                        if (host->ops->enable_dma)
+                                host->ops->enable_dma(host);
+                }
+
+                /* Resetting the controller clears many */
+                host->preset_enabled = false;
+        }
+}
+
+
+void sdhci_remove_host(struct sdhci_host *host, int dead)
+{
+        struct mmc_host *mmc = host->mmc;
+        unsigned long flags;
+
+        if (dead) {
+                spin_lock_irqsave(&host->lock, flags);
+
+                host->flags |= SDHCI_DEVICE_DEAD;
+
+                if (sdhci_has_requests(host)) {
+                        pr_err("%s: Controller removed during "
+                                " transfer!\n", mmc_hostname(mmc));
+                        sdhci_error_out_mrqs(host, -ENOMEDIUM);
+                }
+
+                spin_unlock_irqrestore(&host->lock, flags);
+        }
+
+        sdhci_disable_card_detection(host);
+
+        mmc_remove_host(mmc);
+
+        sdhci_led_unregister(host);
+
+        if (!dead)
+                sdhci_do_reset(host, SDHCI_RESET_ALL);
+
+        sdhci_writel(host, 0, SDHCI_INT_ENABLE);
+        sdhci_writel(host, 0, SDHCI_SIGNAL_ENABLE);
+        free_irq(host->irq, host);
+
+        del_timer_sync(&host->timer);
+        del_timer_sync(&host->data_timer);
+
+        tasklet_kill(&host->finish_tasklet);
+
+        if (!IS_ERR(mmc->supply.vqmmc))
+                regulator_disable(mmc->supply.vqmmc);
+
+        if (host->align_buffer)
+                dma_free_coherent(mmc_dev(mmc), host->align_buffer_sz +
+                                  host->adma_table_sz, host->align_buffer,
+                                  host->align_addr);
+
+        host->adma_table = NULL;
+        host->align_buffer = NULL;
+}
+
+EXPORT_SYMBOL_GPL(sdhci_remove_host);
+
+
+
+
+
+
+
+
+
+
+
+
